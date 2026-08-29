@@ -1,0 +1,41 @@
+<!doctype html>
+<meta charset="utf-8" />
+<style>
+  body {
+    font: 13px/1.45 -apple-system, system-ui, sans-serif;
+    margin: 0;
+    padding: 14px;
+    width: 268px;
+    color: #16181d;
+    background: #fff;
+  }
+  h1 { font-size: 13px; margin: 0 0 12px; letter-spacing: .01em; }
+  label { display: block; font-size: 11px; color: #6b7280; margin: 10px 0 4px; }
+  label:first-of-type { margin-top: 0; }
+  input {
+    width: 100%; box-sizing: border-box; padding: 6px 8px; font-size: 13px;
+    border: 1px solid #d3d7de; border-radius: 6px; font-family: inherit;
+  }
+  input#token { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }
+  button {
+    margin-top: 12px; width: 100%; padding: 6px; font-size: 13px; font-family: inherit;
+    border: 0; border-radius: 6px; background: #16181d; color: #fff; cursor: pointer;
+  }
+  #status { margin-top: 11px; font-size: 11px; color: #6b7280; }
+  .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 5px; }
+  .on { background: #17903f; }
+  .off { background: #c02b2b; }
+  .hint { margin-top: 9px; font-size: 11px; color: #9aa0aa; }
+</style>
+<h1>Claude Browser Bridge</h1>
+
+<label for="token">Pairing token</label>
+<input id="token" placeholder="paste from setup" autocomplete="off" spellcheck="false" />
+
+<label for="profile">Profile label for this Chrome</label>
+<input id="profile" placeholder="private" autocomplete="off" spellcheck="false" />
+
+<button id="save">Save</button>
+<div id="status"><span class="dot off"></span>checking…</div>
+<div class="hint">Claude addresses this browser by its label. Use one label per Chrome profile; the token is the same on all of them.</div>
+<script src="popup.js"></script>

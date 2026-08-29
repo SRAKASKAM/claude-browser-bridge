@@ -1,0 +1,12 @@
+{
+  "name": "browser-bridge",
+  "version": "0.1.0",
+  "description": "Let Claude drive the browser you already use — your real Chrome profile, already logged in, with trusted input events. No debugging flags, no throwaway profile.",
+  "author": {
+    "name": "Stanislau Stankevich",
+    "url": "https://github.com/nkvch"
+  },
+  "homepage": "https://github.com/nkvch/claude-browser-bridge",
+  "license": "MIT",
+  "keywords": ["browser", "chrome", "extension", "automation", "testing"]
+}

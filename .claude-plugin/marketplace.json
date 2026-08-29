@@ -1,0 +1,17 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "claude-browser-bridge",
+  "description": "Drive your own everyday Chrome from Claude Code through a small local extension.",
+  "owner": {
+    "name": "Stanislau Stankevich",
+    "url": "https://github.com/nkvch"
+  },
+  "plugins": [
+    {
+      "name": "browser-bridge",
+      "description": "Let Claude drive the browser you already use — your real Chrome profile, already logged in, with trusted input events. No debugging flags, no throwaway profile.",
+      "source": "./",
+      "category": "development"
+    }
+  ]
+}
