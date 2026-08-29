@@ -42,6 +42,13 @@ ask it to open a page and it will.
 Requires [`uv`](https://docs.astral.sh/uv/) and Google Chrome. Nothing else —
 the scripts declare their own Python dependencies.
 
+**Platforms.** macOS, Windows and Linux. Setup is `bridge/setup.sh` or, on a
+Windows shell without bash, `bridge/setup.ps1`. One known gap: running Claude
+Code **inside WSL2 while Chrome runs on the Windows host** is unverified — the
+server and the extension end up in different network namespaces, and WSL's
+`localhostForwarding` is unreliable for a server bound to `127.0.0.1`. Native
+Windows does not have this problem. Reports welcome.
+
 ## What setup actually does
 
 1. Creates `~/.claude-browser-bridge/` — token, pins, screenshots. Deliberately
@@ -90,7 +97,7 @@ a perfectly reasonable conclusion.
 | `bridge/server.py` | Local HTTP↔WebSocket router, one server for many profiles |
 | `bridge/bb.py` | The CLI Claude actually calls |
 | `bridge/extension/` | The MV3 extension source (read it — you are installing it) |
-| `bridge/setup.sh` | Token, state dir, extension sync |
+| `bridge/setup.sh` / `setup.ps1` | Token, state dir, extension sync |
 | `skills/browser-bridge/` | The skill that teaches Claude to use all of the above |
 
 ## Troubleshooting

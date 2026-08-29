@@ -15,6 +15,19 @@ const attached = new Set(); // tabIds we hold a debugger session on
 
 // ------------------------------------------------------------------ identity
 
+/** Which OS Chrome runs on — the select-all keystroke differs per platform. */
+let platformOs = null;
+async function osName() {
+  if (platformOs === null) {
+    try {
+      platformOs = (await chrome.runtime.getPlatformInfo()).os;
+    } catch {
+      platformOs = "unknown";
+    }
+  }
+  return platformOs;
+}
+
 /** Pairing token and port, as stored by the popup. */
 async function loadToken() {
   const cfg = await chrome.storage.local.get(["token", "port"]);
@@ -315,19 +328,27 @@ async function dispatch(op, args) {
       if (args.selector) await ops.click();
       if (await attach(tab.id)) {
         if (args.clear) {
-          // A plain Cmd+A keystroke does not select text on macOS — the editing
-          // command has to be named explicitly.
+          // Select-all is not one keystroke across platforms, and getting it
+          // wrong fails SILENTLY: nothing is selected, so the new text is
+          // appended to the old value instead of replacing it.
+          //
+          // macOS: a plain Cmd+A key event does not select anything — the
+          // editing command has to be named, because Chrome routes it through
+          // the NSResponder key bindings rather than the page.
+          // Windows/Linux: `commands` is a macOS-only concept and is ignored;
+          // there, real Ctrl+A key events are what select the field.
+          const mac = (await osName()) === "mac";
+          const mods = mac ? 4 : 2; // 4 = Meta, 2 = Ctrl
+          const base = { key: "a", code: "KeyA", windowsVirtualKeyCode: 65, modifiers: mods };
           await cdp(tab.id, "Input.dispatchKeyEvent", {
             type: "rawKeyDown",
-            key: "a",
-            code: "KeyA",
-            modifiers: 4,
-            commands: ["selectAll"],
+            ...base,
+            ...(mac ? { commands: ["selectAll"] } : {}),
           });
-          await cdp(tab.id, "Input.dispatchKeyEvent", { type: "keyUp", key: "a", code: "KeyA", modifiers: 4 });
+          await cdp(tab.id, "Input.dispatchKeyEvent", { type: "keyUp", ...base });
         }
         await cdp(tab.id, "Input.insertText", { text: args.text });
-        return { typed: args.text.length, trusted: true };
+        return { typed: args.text.length, trusted: true, platform: await osName() };
       }
       await inPage(
         tab.id,

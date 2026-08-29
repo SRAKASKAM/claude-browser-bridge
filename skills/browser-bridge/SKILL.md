@@ -28,9 +28,15 @@ Two properties follow from that, and they are the whole reason this exists:
 BB="uv run ${CLAUDE_PLUGIN_ROOT}/bridge/bb.py"
 ```
 
+PowerShell:
+
+```powershell
+$BB = "uv run $env:CLAUDE_PLUGIN_ROOT\bridge\bb.py"
+```
+
 Define that first in any session that touches the browser. Everything below uses
-`$BB`. It needs no venv: the scripts declare their own dependencies and `uv`
-resolves them.
+`$BB` in POSIX shell form — translate to the shell you are actually in. It needs
+no venv: the scripts declare their own dependencies and `uv` resolves them.
 
 ## First run
 
@@ -51,6 +57,12 @@ Setup is three moves, and only the middle one needs the human:
 bash "${CLAUDE_PLUGIN_ROOT}/bridge/setup.sh"
 ```
 
+PowerShell (Windows without bash):
+
+```powershell
+& "$env:CLAUDE_PLUGIN_ROOT\bridge\setup.ps1"
+```
+
 That generates the token, copies it to the clipboard, and mirrors the extension
 to `~/.claude-browser-bridge/extension`. Then hand the human exactly these
 steps — Chrome does not allow any script to install an unpacked extension, so
@@ -68,6 +80,14 @@ nohup uv run "${CLAUDE_PLUGIN_ROOT}/bridge/server.py" > /tmp/bridge.log 2>&1 &
 sleep 4 && $BB health
 ```
 
+PowerShell:
+
+```powershell
+Start-Process uv -WindowStyle Hidden -ArgumentList 'run',"$env:CLAUDE_PLUGIN_ROOT\bridge\server.py" `
+  -RedirectStandardOutput "$env:TEMP\bridge.log" -RedirectStandardError "$env:TEMP\bridge.err"
+Start-Sleep 4
+```
+
 If the human wants several Chrome profiles driven, repeat steps 2–3 in each
 one: same token, a distinct label per profile.
 
@@ -80,6 +100,14 @@ user to, and do not conclude the bridge is broken.
 ```bash
 nohup uv run "${CLAUDE_PLUGIN_ROOT}/bridge/server.py" > /tmp/bridge.log 2>&1 &
 sleep 4 && $BB health
+```
+
+PowerShell:
+
+```powershell
+Start-Process uv -WindowStyle Hidden -ArgumentList 'run',"$env:CLAUDE_PLUGIN_ROOT\bridge\server.py" `
+  -RedirectStandardOutput "$env:TEMP\bridge.log" -RedirectStandardError "$env:TEMP\bridge.err"
+Start-Sleep 4
 ```
 
 The extension reconnects to a restarted server on its own. The human is only
@@ -149,6 +177,21 @@ logged-in identity. Set a default with `$BB use <label>`, or pass `--profile`.
 
 Pins are per-profile: a tab id from one Chrome means nothing in another.
 
+## Platforms
+
+macOS, Windows and Linux. The moving parts are `uv`, Chrome and one bash or
+PowerShell script; the extension itself is identical everywhere.
+
+Two caveats worth knowing before you debug something that is not your bug:
+
+- Some notes below are macOS-specific and are marked as such.
+- **WSL is unverified.** Claude Code inside WSL2 with Chrome on the Windows host
+  puts the server and the extension in different network namespaces.
+  `localhostForwarding` is supposed to bridge that, but it is unreliable for a
+  server bound to `127.0.0.1` rather than `0.0.0.0`. If `health` is fine from
+  the shell yet the extension never connects, that is the reason — say so
+  plainly rather than hunting for a Chrome problem that is not there.
+
 ## Gotchas
 
 These are all things that cost someone an afternoon:
@@ -165,9 +208,11 @@ These are all things that cost someone an afternoon:
 - **`clickat` on a non-active tab returns `ok: true` and does nothing.**
   Coordinate clicks need the tab active. So does `shot`.
 - **Clicks and screenshots need the Chrome window frontmost** on macOS.
-- **`Cmd+A` does not select text on macOS** through raw key events. `type
-  --clear` handles it via the named `selectAll` editing command; if you are
-  hand-rolling key events, do the same.
+- **Select-all is not one keystroke across platforms.** `type --clear` handles
+  it (`Cmd+A` plus a named `selectAll` editing command on macOS, real `Ctrl+A`
+  key events elsewhere), but if you hand-roll key events, know that getting it
+  wrong fails *silently* — nothing gets selected and your text is appended to
+  whatever was already in the field, with no error.
 - **`chrome://*` pages cannot be scripted at all.** Nothing can drive
   `chrome://extensions` — that is why extension install is the human's job. To
   reload the extension after editing it, use the op instead of the UI:

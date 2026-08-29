@@ -40,7 +40,9 @@ mkdir -p "$EXT_DIR"
 cp "$HERE/extension/"* "$EXT_DIR/"
 echo "extension: synced to $EXT_DIR"
 
-if command -v pbcopy >/dev/null 2>&1; then
+if command -v clip.exe >/dev/null 2>&1; then
+  tr -d '\n' < "$TOKEN_FILE" | clip.exe && echo "token: copied to clipboard"
+elif command -v pbcopy >/dev/null 2>&1; then
   tr -d '\n' < "$TOKEN_FILE" | pbcopy && echo "token: copied to clipboard"
 elif command -v wl-copy >/dev/null 2>&1; then
   tr -d '\n' < "$TOKEN_FILE" | wl-copy && echo "token: copied to clipboard"
