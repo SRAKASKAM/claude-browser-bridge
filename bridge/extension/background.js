@@ -458,9 +458,23 @@ async function dispatch(op, args) {
 
     shot: async () => {
       const tab = await targetTab(args);
+      // captureVisibleTab only ever photographs the FOREGROUND tab, so using it
+      // means activating this one first — which yanks the window away from
+      // whoever was looking at it, the user or a second agent. CDP screenshots
+      // a background tab in place, so prefer it and keep the fallback for tabs
+      // the debugger cannot attach to (DevTools open, policy-blocked).
+      if (await attach(tab.id)) {
+        try {
+          const { data } = await cdp(tab.id, "Page.captureScreenshot", { format: "png" });
+          return { url: tab.url, title: tab.title, dataUrl: `data:image/png;base64,${data}` };
+        } catch {
+          // Attached but the command failed (a page CDP will not paint, a
+          // detach mid-flight). Fall through rather than losing the screenshot.
+        }
+      }
       await chrome.tabs.update(tab.id, { active: true });
       const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
-      return { url: tab.url, title: tab.title, dataUrl };
+      return { url: tab.url, title: tab.title, dataUrl, activated: true };
     },
 
     waitFor: async () => {

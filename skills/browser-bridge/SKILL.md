@@ -137,10 +137,20 @@ $BB whoami               # which identity am I actually in
 $BB pin 1234567          # own one tab — do this FIRST
 ```
 
-**Pinning is not optional.** Without a pin, every op lands on whatever tab is
-active *right now*, so the moment the user switches tabs your next click goes
-into their private conversation. Pin a tab, then every op is addressed
-explicitly. `tabs`, `activate` and `whoami` deliberately ignore the pin.
+**Pinning is not optional, and it is now enforced.** `navigate`, `click`,
+`clickAt`, `type`, `key`, `eval`, `scroll` and `shot` refuse to run until you
+have pinned a tab or passed an explicit `tabId` — they used to fall back to
+"whatever tab is active in the last focused window", which is how a shopping
+site got opened in the tab another agent was working in. `tabs`, `whoami`,
+`health` and `activate` still work unpinned.
+
+**Your pin and your default profile are yours alone.** Both are keyed by
+`CLAUDE_CODE_SESSION_ID` (override with `BROWSER_BRIDGE_SESSION`), so a second
+agent on the same browser cannot re-aim you by pinning its own tab or by
+running `bb use`. Consequence worth knowing: `bb use` no longer carries across
+agents, so **set your own profile explicitly** — with several profiles
+connected and no default of your own, the server returns 409 rather than
+guessing which identity you meant. That refusal is the feature.
 
 Better still, work in **your own window**, so that focusing your tab never yanks
 the user out of what they are reading:
@@ -221,7 +231,10 @@ These are all things that cost someone an afternoon:
   found". Walk the shadow roots in `eval`, take `getBoundingClientRect`, and
   `clickat` the coordinates.
 - **`clickat` on a non-active tab returns `ok: true` and does nothing.**
-  Coordinate clicks need the tab active. So does `shot`.
+  Coordinate clicks need the tab active. `shot` does not: it goes through CDP
+  and photographs a background tab in place, so it no longer yanks the window
+  away from the user or another agent. It only falls back to activating the tab
+  when the debugger cannot attach, and says so with `"activated": true`.
 - **Clicks and screenshots need the Chrome window frontmost** on macOS.
 - **Select-all is not one keystroke across platforms.** `type --clear` handles
   it (`Cmd+A` plus a named `selectAll` editing command on macOS, real `Ctrl+A`

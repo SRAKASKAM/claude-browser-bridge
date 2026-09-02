@@ -39,10 +39,38 @@ PORT = os.getenv("BROWSER_BRIDGE_PORT", "8799")
 BASE = f"http://127.0.0.1:{PORT}"
 
 PINS_DIR = HOME / "pins"
-DEFAULT_PROFILE_FILE = HOME / "default_profile"
+
+# Which agent is asking. Two agents share one browser and one state directory,
+# so anything remembered per-profile — the pinned tab, the default profile —
+# would otherwise be remembered for BOTH of them, and whoever wrote last would
+# silently redirect the other. That is not hypothetical: a personal agent
+# inherited a work agent's default profile and opened a shopping site in the
+# tab the work agent was mid-task in.
+SESSION = (
+    os.getenv("BROWSER_BRIDGE_SESSION")
+    or os.getenv("CLAUDE_CODE_SESSION_ID")
+    or os.getenv("CLAUDE_CODE_HOST_SESSION_ID")
+    or "shared"
+)
+SESSION_KEY = "".join(c if c.isalnum() or c in "-_" else "_" for c in SESSION)[:64]
+
+DEFAULT_PROFILE_FILE = HOME / f"default_profile.{SESSION_KEY}"
 
 # Ops that must never be silently retargeted at the pinned tab.
 UNPINNED_OPS = {"tabs", "activate", "whoami"}
+
+# Ops that need a tab of your own. Without a pin these land on "whatever tab is
+# active in the last focused window" — the user's tab, or another agent's.
+# Refuse instead: a loud error costs one round trip, hijacking someone's tab
+# costs their work.
+#
+# The read-only ones are here for a second reason: `snapshot`, `text` and `shot`
+# on an unowned tab quietly pull whatever the user or the other agent had open
+# into this agent's context. Reading the wrong page is a leak, not a typo.
+TARGETED_OPS = {
+    "navigate", "click", "clickAt", "type", "key", "eval",
+    "shot", "snapshot", "text", "waitFor",
+}
 
 
 def token() -> str:
@@ -65,8 +93,13 @@ def default_profile() -> str | None:
 
 
 def pin_file(profile: str | None) -> pathlib.Path:
-    """Pins are per-profile: tab ids from one Chrome mean nothing in another."""
-    return PINS_DIR / f"{profile or '_inferred'}.tab"
+    """Pins are per-profile AND per-agent.
+
+    Per-profile because tab ids from one Chrome mean nothing in another.
+    Per-agent because two agents driving the same profile would otherwise share
+    one pin file, and the second `pin` would quietly re-aim the first agent.
+    """
+    return PINS_DIR / f"{profile or '_inferred'}.{SESSION_KEY}.tab"
 
 
 def pinned_tab(profile: str | None) -> int | None:
@@ -86,6 +119,21 @@ def post(op: str, args: dict, profile: str | None, timeout: float = 60.0) -> dic
     tab = pinned_tab(profile)
     if tab is not None and op not in UNPINNED_OPS and "tabId" not in args:
         args = {**args, "tabId": tab}
+    elif tab is None and op in TARGETED_OPS and "tabId" not in args:
+        sys.exit(
+            json.dumps(
+                {
+                    "ok": False,
+                    "error": f"'{op}' needs a tab of your own — none pinned for "
+                    f"profile '{profile or '(inferred)'}'",
+                    "fix": "open your own window and pin the tab it returns, so this "
+                    "lands nowhere near the user's tabs or another agent's:\n"
+                    "  bb raw '{\"op\":\"newWindow\",\"args\":{\"url\":\"about:blank\"}}'\n"
+                    "  bb pin <tabId from that reply>\n"
+                    "To reuse a tab you already know: pass tabId in args, or `bb pin` it.",
+                }
+            )
+        )
     payload: dict = {"op": op, "args": args}
     if profile:
         payload["profile"] = profile
