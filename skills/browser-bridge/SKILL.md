@@ -91,6 +91,21 @@ Start-Sleep 4
 If the human wants several Chrome profiles driven, repeat steps 2–3 in each
 one: same token, a distinct label per profile.
 
+**On macOS you can do step 2 yourself**, which matters when several profiles
+need the extension and the human would otherwise repeat the same clicks five
+times:
+
+```bash
+"${CLAUDE_PLUGIN_ROOT}/bridge/macos/install-extension.sh" --list
+"${CLAUDE_PLUGIN_ROOT}/bridge/macos/install-extension.sh" "Personal"
+```
+
+It drives Chrome's own UI — no `chrome://` scripting, that boundary still
+holds. Two conditions: the controlling app needs Accessibility, and Chrome must
+stay frontmost (the script aborts rather than typing into whatever the human
+clicked). Step 3, the token and label in the popup, is still theirs. On Windows
+and Linux there is no equivalent — hand over the three clicks.
+
 ## Starting the server is your job, not theirs
 
 `bb health` failing with **"bridge server not running: Connection refused"**

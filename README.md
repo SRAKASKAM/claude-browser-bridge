@@ -98,7 +98,27 @@ a perfectly reasonable conclusion.
 | `bridge/bb.py` | The CLI Claude actually calls |
 | `bridge/extension/` | The MV3 extension source (read it — you are installing it) |
 | `bridge/setup.sh` / `setup.ps1` | Token, state dir, extension sync |
+| `bridge/macos/` | Optional macOS conveniences — see below |
 | `skills/browser-bridge/` | The skill that teaches Claude to use all of the above |
+
+### Optional: `bridge/macos/`
+
+Chrome forbids every script from touching `chrome://` pages, so loading an
+unpacked extension is normally yours to do by hand. On macOS there is a way
+round it that stays inside the rules — drive the same keyboard a human would:
+
+```sh
+bridge/macos/install-extension.sh --list        # profile names you can pass
+bridge/macos/install-extension.sh "Personal"    # load the extension into it
+bridge/macos/install-extension.sh "Personal" --reload
+```
+
+It needs Accessibility granted to whichever app runs it, and it aborts loudly
+the moment Chrome stops being frontmost rather than typing into whatever window
+you clicked. `open-chrome.sh` opens your ordinary Chrome — no debugging port, no
+automation switches — at a URL or profile directory.
+
+On Windows and Linux these do not apply: use the three clicks in **Install**.
 
 ## Troubleshooting
 
