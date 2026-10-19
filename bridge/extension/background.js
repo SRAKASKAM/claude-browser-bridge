@@ -323,6 +323,28 @@ async function dispatch(op, args) {
       return { clickedAt: base, trusted: true };
     },
 
+    // Canvas apps (Miro, maps, Figma) pan on a plain wheel and zoom on
+    // Ctrl+wheel — the same event a trackpad pinch produces.
+    wheel: async () => {
+      const tab = await targetTab(args);
+      if (!(await attach(tab.id))) throw new Error("need a debugger session for wheel events");
+      const base = { x: Math.round(args.x), y: Math.round(args.y) };
+      await cdp(tab.id, "Input.dispatchMouseEvent", { ...base, type: "mouseMoved" });
+      // Chrome acks a wheel event only after the compositor handles it, and a
+      // tab in an occluded window may never produce that frame — don't hang on it.
+      await Promise.race([
+        cdp(tab.id, "Input.dispatchMouseEvent", {
+          ...base,
+          type: "mouseWheel",
+          deltaX: args.deltaX || 0,
+          deltaY: args.deltaY || 0,
+          modifiers: args.ctrl ? 2 : 0, // 2 = Ctrl
+        }),
+        new Promise((resolve) => setTimeout(resolve, 1500)),
+      ]);
+      return { wheelAt: base, deltaX: args.deltaX || 0, deltaY: args.deltaY || 0, ctrl: !!args.ctrl };
+    },
+
     type: async () => {
       const tab = await targetTab(args);
       if (args.selector) await ops.click();

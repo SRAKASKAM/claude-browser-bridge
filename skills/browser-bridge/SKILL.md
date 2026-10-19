@@ -178,6 +178,7 @@ $BB text ['.main']                           # readable text
 $BB shot                                     # screenshot -> file path, then Read it
 $BB click '#login-button'
 $BB clickat 120 340                          # viewport coords (cross-origin iframes)
+$BB wheel 800 450 -100 --ctrl                # Ctrl+wheel = zoom a canvas (Miro, maps); no --ctrl = scroll; --dx N
 $BB type 'input[name=email]' 'you@example.com' --clear
 $BB key Enter                                # Enter Tab Escape Backspace ArrowUp ArrowDown
 $BB eval 'location.href'
@@ -236,6 +237,10 @@ These are all things that cost someone an afternoon:
   away from the user or another agent. It only falls back to activating the tab
   when the debugger cannot attach, and says so with `"activated": true`.
 - **Clicks and screenshots need the Chrome window frontmost** on macOS.
+- **`wheel` needs the tab active, and its deltas are steep.** In Miro one
+  Ctrl+wheel of ±300 jumps a whole zoom decade (100% → 5%); step by ±60–150 and
+  read the zoom indicator between steps. On an occluded window Chrome never
+  acks the event, so the op gives up waiting after 1.5 s instead of hanging.
 - **Select-all is not one keystroke across platforms.** `type --clear` handles
   it (`Cmd+A` plus a named `selectAll` editing command on macOS, real `Ctrl+A`
   key events elsewhere), but if you hand-roll key events, know that getting it

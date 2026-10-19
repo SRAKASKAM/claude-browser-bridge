@@ -17,6 +17,7 @@ default once with `use`; with a single browser connected it is inferred.
     bb text
     bb shot
     bb eval 'location.href'
+    bb wheel 800 450 -300 --ctrl   # zoom in at a point (Ctrl+wheel); no --ctrl = scroll
     bb raw '{"op":"clickAt","args":{"x":120,"y":340}}'
 
     ... --profile work         # any command, explicit target
@@ -68,7 +69,7 @@ UNPINNED_OPS = {"tabs", "activate", "whoami"}
 # on an unowned tab quietly pull whatever the user or the other agent had open
 # into this agent's context. Reading the wrong page is a leak, not a typo.
 TARGETED_OPS = {
-    "navigate", "click", "clickAt", "type", "key", "eval",
+    "navigate", "click", "clickAt", "wheel", "type", "key", "eval",
     "shot", "snapshot", "text", "waitFor",
 }
 
@@ -161,6 +162,10 @@ def build(argv: list[str]) -> tuple[str, dict]:
             return "click", {"selector": rest[0]}
         case "clickat":
             return "clickAt", {"x": float(rest[0]), "y": float(rest[1])}
+        case "wheel":
+            dx = float(rest[rest.index("--dx") + 1]) if "--dx" in rest else 0
+            return "wheel", {"x": float(rest[0]), "y": float(rest[1]), "deltaY": float(rest[2]),
+                             "deltaX": dx, "ctrl": "--ctrl" in rest}
         case "type":
             return "type", {"selector": rest[0], "text": rest[1], "clear": "--clear" in rest}
         case "key":
