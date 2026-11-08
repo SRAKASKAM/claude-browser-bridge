@@ -7,8 +7,7 @@ default once with `use`; with a single browser connected it is inferred.
     bb health
     bb use private
     bb whoami
-    bb tabs
-    bb pin 1234567
+    bb open https://www.vinted.pl  # your own tab in the minimized agent window, pinned
     bb navigate https://www.vinted.pl
     bb snapshot
     bb click '#login-button'
@@ -18,6 +17,9 @@ default once with `use`; with a single browser connected it is inferred.
     bb shot
     bb eval 'location.href'
     bb wheel 800 450 -300 --ctrl   # zoom in at a point (Ctrl+wheel); no --ctrl = scroll
+    bb ask "Enter the SMS code" 'input[name=otp]'   # human step: red outline + banner
+    bb ask-done                    # clear it once the human has acted
+    bb close                       # close your tab and unpin
     bb raw '{"op":"clickAt","args":{"x":120,"y":340}}'
 
     ... --profile work         # any command, explicit target
@@ -30,7 +32,10 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import shlex
+import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 
@@ -58,7 +63,15 @@ SESSION_KEY = "".join(c if c.isalnum() or c in "-_" else "_" for c in SESSION)[:
 DEFAULT_PROFILE_FILE = HOME / f"default_profile.{SESSION_KEY}"
 
 # Ops that must never be silently retargeted at the pinned tab.
-UNPINNED_OPS = {"tabs", "activate", "whoami"}
+UNPINNED_OPS = {"tabs", "activate", "whoami", "openTab", "newWindow", "hide"}
+
+# Optional per-machine hook that shows the human a notification for `bb ask`:
+#   notify show <key> <title> <body> <command to run on click>
+#   notify dismiss <key>
+NOTIFY_HOOK = HOME / "notify"
+
+# Pins older than this point at tabs long gone.
+STALE_AFTER_S = 30 * 24 * 3600
 
 # Ops that need a tab of your own. Without a pin these land on "whatever tab is
 # active in the last focused window" — the user's tab, or another agent's.
@@ -71,6 +84,7 @@ UNPINNED_OPS = {"tabs", "activate", "whoami"}
 TARGETED_OPS = {
     "navigate", "click", "clickAt", "wheel", "type", "key", "eval",
     "shot", "snapshot", "text", "waitFor",
+    "attention", "clearAttention", "closeTab", "reveal",
 }
 
 
@@ -127,10 +141,9 @@ def post(op: str, args: dict, profile: str | None, timeout: float = 60.0) -> dic
                     "ok": False,
                     "error": f"'{op}' needs a tab of your own — none pinned for "
                     f"profile '{profile or '(inferred)'}'",
-                    "fix": "open your own window and pin the tab it returns, so this "
-                    "lands nowhere near the user's tabs or another agent's:\n"
-                    "  bb raw '{\"op\":\"newWindow\",\"args\":{\"url\":\"about:blank\"}}'\n"
-                    "  bb pin <tabId from that reply>\n"
+                    "fix": "open a tab of your own in the agent window (it pins itself), so "
+                    "this lands nowhere near the user's tabs or another agent's:\n"
+                    "  bb open <url>\n"
                     "To reuse a tab you already know: pass tabId in args, or `bb pin` it.",
                 }
             )
@@ -146,7 +159,10 @@ def post(op: str, args: dict, profile: str | None, timeout: float = 60.0) -> dic
     )
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.load(resp)
+            out = json.load(resp)
+            if "No tab with id" in str(out.get("error", "")):
+                out["fix"] = "your tab is gone (closed by the user, or the agent window was closed) — `bb open <url>` again"
+            return out
     except urllib.error.HTTPError as exc:
         return {"ok": False, "http_status": exc.code, "error": exc.read().decode()[:500]}
     except urllib.error.URLError as exc:
@@ -184,12 +200,75 @@ def build(argv: list[str]) -> tuple[str, dict]:
             return "whoami", {}
         case "activate":
             return "activate", {"tabId": int(rest[0])}
+        case "reveal":
+            return "reveal", {"tabId": int(rest[0])} if rest else {}
+        case "hide":
+            return "hide", {}
         case "waitfor":
             return "waitFor", {"selector": rest[0]} if rest[0].startswith((".", "#", "[")) else {"text": rest[0]}
         case "detach":
             return "detach", {}
         case _:
             sys.exit(f"unknown command: {cmd}\n\n{__doc__}")
+
+
+def prune_stale_pins() -> None:
+    """Drop pin files of sessions that ended long ago — one per session, never removed."""
+    cutoff = time.time() - STALE_AFTER_S
+    for path in PINS_DIR.glob("*.tab"):
+        try:
+            if path.stat().st_mtime < cutoff:
+                path.unlink()
+        except OSError:
+            pass
+
+
+def notify(*args: str) -> bool:
+    """True only if the hook ran and succeeded — the human is told or he is not."""
+    if not (NOTIFY_HOOK.exists() and os.access(NOTIFY_HOOK, os.X_OK)):
+        return False
+    try:
+        return subprocess.run([str(NOTIFY_HOOK), *args], check=False, timeout=15).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def ask(argv: list[str], profile: str | None) -> dict:
+    """Hand a step to the human without raising any window.
+
+    The page gets a red outline on each selector and a red bar with the message;
+    the human gets a notification whose click reveals exactly this tab.
+    """
+    if not argv:
+        sys.exit('usage: bb ask "what the human must do" [selector ...]')
+    message, selectors = argv[0], argv[1:]
+    out = post("attention", {"message": message, "selectors": selectors}, profile)
+    if not out.get("ok"):
+        return out
+    tab = out["result"]["tabId"]
+    who = out.get("profile") or profile or ""
+    # The hook may run with a bare PATH and environment (Hammerspoon has no uv):
+    # bb.py is stdlib-only, so the interpreter running it now is enough, and the
+    # bridge's own settings travel along explicitly.
+    env = [f"{k}={os.environ[k]}" for k in ("BROWSER_BRIDGE_HOME", "BROWSER_BRIDGE_PORT") if k in os.environ]
+    reveal = " ".join(
+        shlex.quote(part)
+        for part in ["env", *env, sys.executable, str(pathlib.Path(__file__).resolve()),
+                     "reveal", str(tab), "--profile", who]
+    )
+    out["notified"] = notify("show", f"{who}:{tab}", f"Chrome: {who}", message, reveal)
+    if not out["notified"]:
+        out["note"] = (f"no notification shown (hook {NOTIFY_HOOK} missing or failed) — "
+                       "tell the human yourself; do not raise the window")
+    return out
+
+
+def ask_done(profile: str | None) -> dict:
+    out = post("clearAttention", {}, profile)
+    if out.get("ok"):
+        notify("dismiss", f"{out.get('profile') or profile or ''}:{out['result']['cleared']}")
+        post("hide", {}, profile)
+    return out
 
 
 def take_profile_flag(argv: list[str]) -> tuple[list[str], str | None]:
@@ -241,6 +320,34 @@ def main() -> None:
         pin_file(profile).write_text(str(int(argv[1])))
         print(json.dumps({"ok": True, "profile": profile, "pinned_tab": int(argv[1])}))
         return
+
+    if argv[0] == "open":
+        prune_stale_pins()
+        previous = pinned_tab(profile)
+        out = post("openTab", {"url": argv[1]} if len(argv) > 1 else {}, profile)
+        if out.get("ok") and previous is not None:
+            # One tab per session: the one this pin used to own would otherwise
+            # keep running, unseen, in the agent window. closeTab refuses
+            # anything outside that window, so this cannot hit the user's tab.
+            post("closeTab", {"tabId": previous}, profile)
+        if out.get("ok"):
+            PINS_DIR.mkdir(parents=True, exist_ok=True)
+            pin_file(profile).write_text(str(out["result"]["tabId"]))
+            out["pinned_tab"] = out["result"]["tabId"]
+        print(json.dumps(out, indent=2, ensure_ascii=False))
+        sys.exit(0 if out.get("ok") else 1)
+
+    if argv[0] == "close":
+        out = post("closeTab", {}, profile)
+        if out.get("ok"):
+            pin_file(profile).unlink(missing_ok=True)
+        print(json.dumps(out, indent=2, ensure_ascii=False))
+        sys.exit(0 if out.get("ok") else 1)
+
+    if argv[0] in ("ask", "ask-done"):
+        out = ask(argv[1:], profile) if argv[0] == "ask" else ask_done(profile)
+        print(json.dumps(out, indent=2, ensure_ascii=False))
+        sys.exit(0 if out.get("ok") else 1)
 
     if argv[0] == "unpin":
         pin_file(profile).unlink(missing_ok=True)

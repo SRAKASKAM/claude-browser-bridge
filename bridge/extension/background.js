@@ -180,9 +180,13 @@ connect();
 // ------------------------------------------------------------------ helpers
 
 async function targetTab(args) {
-  if (args.tabId) return await chrome.tabs.get(args.tabId);
-  const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+  let tab;
+  if (args.tabId) tab = await chrome.tabs.get(args.tabId);
+  else [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
   if (!tab) throw new Error("no active tab");
+  // Even read-only ops want the page awake: a hidden page may never render
+  // the content they are about to read.
+  if (await inAgentWindow(tab)) await attach(tab.id);
   return tab;
 }
 
@@ -192,11 +196,21 @@ async function attach(tabId) {
   try {
     await chrome.debugger.attach({ tabId }, CDP_VERSION);
     attached.add(tabId);
-    return true;
   } catch (err) {
     // Already attached by DevTools / another client, or policy-blocked.
     return false;
   }
+  // The emulation lives and dies with the debugger session, so it is set on
+  // every fresh attach. Only in the agent window: in the user's own window it
+  // would keep his background tabs running as if he were looking at them.
+  try {
+    if (await inAgentWindow(await chrome.tabs.get(tabId))) {
+      await cdp(tabId, "Emulation.setFocusEmulationEnabled", { enabled: true });
+    }
+  } catch {
+    // tab closed or detached in between — the attach itself still stands
+  }
+  return true;
 }
 
 function cdp(tabId, method, params = {}) {
@@ -244,6 +258,99 @@ function rectOf(selector) {
   return { x: r.left + r.width / 2, y: r.top + r.height / 2, w: r.width, h: r.height };
 }
 
+// ------------------------------------------------------------- agent window
+//
+// Every agent on this profile works in ONE window that stays minimized in the
+// Dock, each agent in its own tab. A window per agent, created focused, is what
+// kept throwing a full-screen Chrome over whatever app the user was in.
+//
+// A minimized window's pages are "hidden": no animation frames, and wheel
+// events are never acked. Focus emulation over the debugger session makes the
+// page visible and focused again — rendering, wheel, shadow-DOM dropdowns and
+// coordinate clicks all work while the window sits in the Dock.
+
+// The agent window is the one holding a pinned about:blank#claude-agents tab.
+// Nothing is stored: the marker travels with its window, so the window is found
+// again after a restart under its new id, and it outlives the agent tabs
+// closing — it is created once, not once per task. Not an extension page:
+// reloading the extension closes those, which would orphan the window.
+const AGENT_PAGE = "about:blank#claude-agents";
+
+async function agentWindowId() {
+  const tabs = await chrome.tabs.query({});
+  // Right after the window is created the tab may only have a pendingUrl.
+  const marker = tabs.find((t) => (t.url || t.pendingUrl) === AGENT_PAGE);
+  return marker ? marker.windowId : null;
+}
+
+// Tabs where the user has been asked to act; the window must not be minimized
+// under him while any is outstanding — he may have switched app to fetch a code.
+async function attentionTabs() {
+  const { attentionTabs: ids } = await chrome.storage.local.get("attentionTabs");
+  return ids || [];
+}
+
+// Serialized: two agents (or the user closing tabs) must not lose each other's entry.
+let attentionLock = Promise.resolve();
+
+function setAttention(tabId, on) {
+  const run = attentionLock.then(async () => {
+    const ids = await attentionTabs();
+    if (!on && !ids.includes(tabId)) return;
+    await chrome.storage.local.set({ attentionTabs: [...ids.filter((id) => id !== tabId), ...(on ? [tabId] : [])] });
+  });
+  attentionLock = run.catch(() => {});
+  return run;
+}
+
+chrome.tabs.onRemoved.addListener((tabId) => setAttention(tabId, false));
+
+/** Minimize the agent window unless the user is in it or has a step open in it. */
+async function minimizeAgentWindow(windowId) {
+  const win = await chrome.windows.get(windowId, { populate: true });
+  if (win.state === "minimized") return { hidden: true };
+  if (win.focused) return { hidden: false, reason: "the user is in it" };
+  const asked = await attentionTabs();
+  if (win.tabs.some((t) => asked.includes(t.id))) return { hidden: false, reason: "a human step is open in it" };
+  await chrome.windows.update(windowId, { state: "minimized" });
+  return { hidden: true };
+}
+
+// A restored session brings the agent window back in whatever state it was.
+chrome.runtime.onStartup.addListener(async () => {
+  await chrome.storage.local.remove("attentionTabs");
+  const id = await agentWindowId();
+  if (id !== null) await minimizeAgentWindow(id);
+});
+
+// Two agents calling openTab at once must not both create a window.
+let windowLock = Promise.resolve();
+
+async function ensureAgentWindow() {
+  const run = windowLock.then(async () => {
+    const existing = await agentWindowId();
+    if (existing !== null) {
+      // Left open after a human step and the user has moved on: back to the Dock.
+      await minimizeAgentWindow(existing);
+      return existing;
+    }
+    // `state: "minimized"` on create is ignored on macOS — the window opens
+    // maximized. Create it unfocused and minimize it straight away: the only
+    // moment it is ever on screen, once per profile per browser start.
+    const win = await chrome.windows.create({ url: AGENT_PAGE, focused: false, width: 1440, height: 900 });
+    await chrome.windows.update(win.id, { state: "minimized" });
+    await chrome.tabs.update(win.tabs[0].id, { pinned: true });
+    return win.id;
+  });
+  windowLock = run.catch(() => {});
+  return run;
+}
+
+async function inAgentWindow(tab) {
+  return tab.windowId === (await agentWindowId());
+}
+
+
 // --------------------------------------------------------------- operations
 
 async function dispatch(op, args) {
@@ -255,41 +362,126 @@ async function dispatch(op, args) {
       };
     },
 
+    // Switches the tab inside its own window. Never raises the window: that is
+    // `reveal`, and only a human click on the banner should ever call it.
     activate: async () => {
       const tab = await chrome.tabs.get(args.tabId);
       await chrome.tabs.update(tab.id, { active: true });
-      await chrome.windows.update(tab.windowId, { focused: true });
       return { tabId: tab.id, url: tab.url };
     },
 
-    // Open a SEPARATE Chrome window for the agent to drive, so that activating
-    // "our" tab does not yank the user out of whatever tab he is reading in his
-    // own window. Returns the new tabId — pin it right after.
-    newWindow: async () => {
-      const win = await chrome.windows.create({
-        url: args.url || "about:blank",
-        focused: args.focused !== false,
-        ...(args.width ? { width: args.width } : {}),
-        ...(args.height ? { height: args.height } : {}),
-      });
-      const tab = win.tabs && win.tabs[0];
-      if (!tab) throw new Error("window created without a tab");
-      if (args.url) await waitForLoad(tab.id, args.timeoutMs || 30000);
+    // A tab of the caller's own in the shared, minimized agent window.
+    openTab: async () => {
+      const windowId = await ensureAgentWindow();
+      const tab = await chrome.tabs.create({ windowId, url: args.url || "about:blank", active: false });
+      await attach(tab.id);
+      const load = args.url ? await waitForLoad(tab.id, args.timeoutMs || 30000) : {};
       const fresh = await chrome.tabs.get(tab.id);
-      return { tabId: fresh.id, windowId: win.id, url: fresh.url, title: fresh.title };
+      return { tabId: fresh.id, windowId, url: fresh.url, title: fresh.title, ...load };
     },
 
-    // Close a window the agent opened. Takes an explicit windowId on purpose —
-    // never guess, and never close the window the user is working in.
+    // Kept for agents still following the old instructions: it used to open a
+    // focused window of its own. It now opens a tab in the agent window, and
+    // ignores `focused`, `width` and `height`.
+    newWindow: async () => await ops.openTab(),
+
+    // Closes the caller's tab. Only tabs in the agent window — the user's tabs
+    // are never an agent's to close.
+    closeTab: async () => {
+      const tab = await chrome.tabs.get(args.tabId);
+      if (!(await inAgentWindow(tab))) throw new Error("closeTab only closes tabs in the agent window");
+      if (tab.url === AGENT_PAGE) throw new Error("that is the agent window's own tab, not yours");
+      await chrome.tabs.remove(tab.id);
+      return { closed: tab.id };
+    },
+
+    // Old counterpart of newWindow: closes only the caller's tab (bb passes the
+    // pinned tabId) — other agents work in the agent window too. Agents no
+    // longer own whole windows, so any other window is the user's: refused.
     closeWindow: async () => {
-      if (typeof args.windowId !== "number") throw new Error("closeWindow needs an explicit windowId");
-      await chrome.windows.remove(args.windowId);
-      return { closed: args.windowId };
+      if (args.windowId !== (await agentWindowId())) throw new Error("agents no longer own windows — close your tab with `bb close`");
+      if (typeof args.tabId !== "number") throw new Error("the agent window is shared — close your own tab with `bb close`");
+      return await ops.closeTab();
+    },
+
+    // Bring a tab in front of the user — for the banner's click handler, when
+    // he has asked to see it. Agents do not call this to get his attention.
+    reveal: async () => {
+      const tab = await chrome.tabs.get(args.tabId);
+      await chrome.tabs.update(tab.id, { active: true });
+      await chrome.windows.update(tab.windowId, { state: "normal", focused: true });
+      return { tabId: tab.id, windowId: tab.windowId };
+    },
+
+    // Send the agent window back to the Dock, unless the user is in it or a
+    // human step is still open there.
+    hide: async () => {
+      const id = await agentWindowId();
+      if (id === null) return { hidden: false };
+      return await minimizeAgentWindow(id);
+    },
+
+    // Mark what the user has to do himself: a red outline on each selector and
+    // a red bar on top of the page with the message.
+    attention: async () => {
+      const tab = await targetTab(args);
+      await ops.clearAttention();
+      await setAttention(tab.id, true);
+      const found = await inPage(
+        tab.id,
+        (selectors, message) => {
+          const hits = [];
+          selectors.forEach((sel) => {
+            let el = null;
+            try {
+              el = document.querySelector(sel);
+            } catch {
+              // a malformed selector must not cost the other outlines and the bar
+            }
+            if (!el) return;
+            hits.push(sel);
+            if (el.dataset.claudeAttention !== undefined) return; // two selectors, one element
+            el.dataset.claudeAttention = JSON.stringify([el.style.outline, el.style.outlineOffset]);
+            el.style.outline = "4px solid #E11D48";
+            el.style.outlineOffset = "3px";
+            if (hits.length === 1) el.scrollIntoView({ block: "center", behavior: "instant" });
+          });
+          if (message) {
+            const bar = document.createElement("div");
+            bar.id = "claude-attention-bar";
+            bar.dataset.claudeAttention = "[]";
+            bar.textContent = message;
+            bar.style.cssText =
+              "position:fixed;top:0;left:0;right:0;z-index:2147483647;padding:10px 16px;" +
+              "background:#E11D48;color:#fff;font:600 15px/1.3 -apple-system,system-ui,sans-serif;" +
+              "text-align:center;pointer-events:none";
+            document.documentElement.appendChild(bar);
+          }
+          return hits;
+        },
+        [args.selectors || [], args.message || ""],
+      );
+      return { tabId: tab.id, outlined: found, missing: (args.selectors || []).filter((s) => !found.includes(s)) };
+    },
+
+    clearAttention: async () => {
+      const tab = await targetTab(args);
+      await setAttention(tab.id, false);
+      await inPage(tab.id, () => {
+        document.querySelectorAll("[data-claude-attention]").forEach((el) => {
+          if (el.id === "claude-attention-bar") return el.remove();
+          [el.style.outline, el.style.outlineOffset] = JSON.parse(el.dataset.claudeAttention);
+          delete el.dataset.claudeAttention;
+        });
+      });
+      return { cleared: tab.id };
     },
 
     navigate: async () => {
-      let tab = await (args.newTab ? chrome.tabs.create({ url: args.url }) : targetTab(args));
-      if (!args.newTab) await chrome.tabs.update(tab.id, { url: args.url });
+      // A new tab goes into the agent window, never the user's.
+      if (args.newTab) return await ops.openTab();
+      let tab = await targetTab(args);
+      await chrome.tabs.update(tab.id, { url: args.url });
       const load = await waitForLoad(tab.id, args.timeoutMs || 30000);
       tab = await chrome.tabs.get(tab.id);
       return { tabId: tab.id, url: tab.url, title: tab.title, ...load };
@@ -494,6 +686,9 @@ async function dispatch(op, args) {
           // detach mid-flight). Fall through rather than losing the screenshot.
         }
       }
+      // The fallback switches the window's foreground tab, which is fine in
+      // the agent window and not in the user's.
+      if (!(await inAgentWindow(tab))) throw new Error("screenshot needs a debugger session on this tab (DevTools open on it?)");
       await chrome.tabs.update(tab.id, { active: true });
       const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
       return { url: tab.url, title: tab.title, dataUrl, activated: true };
@@ -537,7 +732,8 @@ async function dispatch(op, args) {
     },
 
     detach: async () => {
-      const tab = await targetTab(args);
+      // Not targetTab: in the agent window that would attach first.
+      const tab = await chrome.tabs.get(args.tabId);
       if (attached.has(tab.id)) {
         await chrome.debugger.detach({ tabId: tab.id });
         attached.delete(tab.id);

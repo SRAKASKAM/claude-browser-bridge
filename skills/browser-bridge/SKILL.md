@@ -129,15 +129,14 @@ The extension reconnects to a restarted server on its own. The human is only
 needed when `health` reports `extension_connected: false` — that is a Chrome-side
 problem (extension disabled, profile closed, token never pasted).
 
-## Before you touch anything: own a tab
+## Before you touch anything: open your own tab
 
 ```bash
-$BB tabs                 # what is open
 $BB whoami               # which identity am I actually in
-$BB pin 1234567          # own one tab — do this FIRST
+$BB open https://example.com   # your own tab in the agent window, pinned — do this FIRST
 ```
 
-**Pinning is not optional, and it is now enforced.** `navigate`, `click`,
+**Owning a tab is not optional, and it is enforced.** `navigate`, `click`,
 `clickAt`, `type`, `key`, `eval`, `scroll` and `shot` refuse to run until you
 have pinned a tab or passed an explicit `tabId` — they used to fall back to
 "whatever tab is active in the last focused window", which is how a shopping
@@ -152,17 +151,67 @@ agents, so **set your own profile explicitly** — with several profiles
 connected and no default of your own, the server returns 409 rather than
 guessing which identity you meant. That refusal is the feature.
 
-Better still, work in **your own window**, so that focusing your tab never yanks
-the user out of what they are reading:
+## The agent window: minimized, shared, never in the user's face
+
+Each profile has **one agent window**, kept minimized in the Dock. Every agent
+on that profile works in its own tab there; `bb open` creates the window on
+first use and adds a tab to it after that. The window is marked by a pinned
+`about:blank#claude-agents` tab, so it survives its agent tabs closing and is found again
+after a browser restart. The user's own windows stay his —
+nothing in this bridge raises, focuses or un-minimizes a window on an agent's
+behalf.
+
+Everything works in a minimized window: clicks, typing, keys, wheel,
+screenshots, shadow-DOM dropdowns, animations. A minimized page is normally
+"hidden" (no animation frames, wheel events never acked), so the extension
+turns on CDP focus emulation for every tab in the agent window — the page
+behaves as visible and focused while the window sits in the Dock.
 
 ```bash
-$BB raw '{"op":"newWindow","args":{"url":"https://example.com","width":1280,"height":900}}'
-$BB pin <tabId returned above>
+$BB open https://example.com     # tab + pin
+$BB navigate https://example.com/other
+$BB close                        # close your tab, unpin — when you are done
 ```
 
-Choose the window **before the first navigation**. Opening a site in the user's
-window and moving it afterwards leaves two tabs on the same site, and
-single-session sites (banks especially) log the user out.
+- Open the site in your tab **on the first navigation**. Opening it in one of the
+  user's tabs and moving it afterwards leaves two tabs on the same site, and
+  single-session sites (banks especially) log the user out.
+- **Never raise the window to get the user's attention.** Use `bb ask` (below).
+- The one moment the window is ever on screen: when it is first created it
+  appears unfocused and is minimized straight away — macOS ignores
+  `state: "minimized"` on create, and Chrome refuses bounds that are mostly
+  off-screen.
+- If your tab is gone (the user closed it, or the whole window), `bb open` again.
+- `navigate --new-tab` also opens the tab in the agent window, inactive.
+- Old instructions said `newWindow`/`closeWindow`/`activate`. They still work:
+  `newWindow` opens a tab in the agent window, `closeWindow` on the agent window
+  closes only your tab (any other window is the user's and is refused), and `activate` switches the tab inside its window but
+  never raises the window.
+
+## When the user has to do something himself
+
+A password, a 2FA code, a payment, a button bridge clicks cannot press. Do not
+raise the window and do not just write in chat:
+
+```bash
+$BB ask "Enter the SMS code and press Confirm" 'input[name=otp]' 'button[type=submit]'
+```
+
+The page gets a red outline on each selector (the first is scrolled into view)
+and a red bar on top with the message. Then `bb` runs the notification hook at
+`~/.claude-browser-bridge/notify`, if there is one, with
+`show <key> <title> <message> <reveal command>`; clicking the notification is
+what brings that window and tab to the front. Without a hook, `bb ask` says so
+— tell the user in chat, still without raising anything.
+
+While a step is open, nothing minimizes the window — not another agent's
+`bb open`, not its `ask-done` — so the user can switch app to fetch a code.
+Then poll for the step being done (password field gone, URL left `/login`) and
+clean up:
+
+```bash
+$BB ask-done        # clears the outline, dismisses the notification, minimizes the window again
+```
 
 ## Operations
 
@@ -171,6 +220,7 @@ $BB health                                   # connected profiles
 $BB use private                              # default profile for later commands
 $BB whoami                                   # confirm identity before typing
 $BB tabs
+$BB open [url]  /  $BB close                 # your tab in the agent window (pinned) / close it
 $BB pin 1234567  /  $BB unpin
 $BB navigate https://example.com [--new-tab]
 $BB snapshot                                 # clickable elements + selectors + coords
@@ -183,8 +233,11 @@ $BB type 'input[name=email]' 'you@example.com' --clear
 $BB key Enter                                # Enter Tab Escape Backspace ArrowUp ArrowDown
 $BB eval 'location.href'
 $BB waitfor '.results'                       # selector, or bare text
+$BB ask "message" [selector ...]             # human step: red outline + notification
+$BB ask-done                                 # clear it, minimize the window again
+$BB reveal [tabId]  /  $BB hide              # show your tab to the user (only when he asks) / back to the Dock
 $BB detach
-$BB raw '{"op":"newWindow","args":{...}}'    # any op, full args
+$BB raw '{"op":"clickAt","args":{...}}'      # any op, full args
 
 $BB <anything> --profile work                # explicit target
 ```
@@ -231,16 +284,16 @@ These are all things that cost someone an afternoon:
   `querySelector`, so an element you can plainly see reports "selector not
   found". Walk the shadow roots in `eval`, take `getBoundingClientRect`, and
   `clickat` the coordinates.
-- **`clickat` on a non-active tab returns `ok: true` and does nothing.**
-  Coordinate clicks need the tab active. `shot` does not: it goes through CDP
-  and photographs a background tab in place, so it no longer yanks the window
-  away from the user or another agent. It only falls back to activating the tab
-  when the debugger cannot attach, and says so with `"activated": true`.
-- **Clicks and screenshots need the Chrome window frontmost** on macOS.
-- **`wheel` needs the tab active, and its deltas are steep.** In Miro one
-  Ctrl+wheel of ±300 jumps a whole zoom decade (100% → 5%); step by ±60–150 and
-  read the zoom indicator between steps. On an occluded window Chrome never
-  acks the event, so the op gives up waiting after 1.5 s instead of hanging.
+- **Outside the agent window, a background tab is "hidden".** There `clickat`
+  and `wheel` return `ok: true` and do nothing, and animations stop. Inside the
+  agent window focus emulation fixes all of that — one more reason to work
+  there. `shot` goes through CDP either way and photographs a background tab in
+  place; its fallback (activate the tab, `captureVisibleTab`) only runs in the
+  agent window and says so with `"activated": true`.
+- **`wheel` deltas are steep.** In Miro one Ctrl+wheel of ±300 jumps a whole
+  zoom decade (100% → 5%); step by ±60–150 and read the zoom indicator between
+  steps. If Chrome never acks the event, the op gives up after 1.5 s instead of
+  hanging.
 - **Select-all is not one keystroke across platforms.** `type --clear` handles
   it (`Cmd+A` plus a named `selectAll` editing command on macOS, real `Ctrl+A`
   key events elsewhere), but if you hand-roll key events, know that getting it
@@ -263,7 +316,7 @@ This drives a browser that is logged into the user's real life. Act like it.
 - **`$BB whoami` before typing anything into a form.** Confirm which identity
   you are in. A misrouted keystroke here is a password in a stranger's chat.
 - **Never type credentials, card numbers or one-time codes.** If a flow needs
-  them, stop and hand that step to the human — they are sitting at the browser.
+  them, stop and hand that step to the human with `bb ask`.
 - **Confirm before anything irreversible** — sending, posting, buying,
   deleting, accepting terms. The bridge makes these one command away; that is a
   reason for more care, not less.
