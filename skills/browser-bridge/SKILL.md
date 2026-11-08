@@ -268,6 +268,49 @@ $BB <anything> --profile work                # explicit target
 screenshot and gives you selectors *and* coordinates. Reach for `shot` when the
 question is visual — layout, styling, "does this look right".
 
+## Fast steps with jev
+
+Choosing what to click from a snapshot, or judging "did that work", costs you a
+model turn of several seconds. `jev` hands those narrow judgments to TypeSafe's
+Jev model, which answers in about half a second. **Try `jev` first for every
+click, type and "is it done" step; take the step back yourself only when it
+says it is unsure.**
+
+```bash
+JEV="uv run ${CLAUDE_PLUGIN_ROOT}/bridge/jev.py"
+$JEV do "the Add to cart button"              # find it, click it
+$JEV do "the search field" --type "shoes"     # find it, type into it (clears first)
+$JEV pick "the Sign in link"                  # find it only, print a selector
+$JEV check "the order confirmation is shown" --wait 20   # poll until yes
+```
+
+Describe the target the way a person would ("the blue Pay button under the
+total"), not by selector. Exit codes:
+
+| Exit | Meaning | What you do |
+|---|---|---|
+| 0 | done / yes | carry on |
+| 3 | Jev is unsure; prints its top 5 candidates with selectors | pick one yourself, or `$BB snapshot` |
+| 4 | `check` answered no / timed out | look at the page yourself |
+| 1 | error (no key, bridge down, Jev unreachable) | fall back to plain `$BB` |
+
+Measured on a real page: Jev picks in 0.3 s where a Claude turn takes 5–10 s,
+and `jev do` (list + pick + click) runs in about 1 s.
+
+It works on your pinned tab (`$BB open` first) and takes `--profile` like `$BB`.
+It does not see inside iframes or shadow roots, or icon-only controls with no
+label — expect exit 3 there.
+
+**Privacy.** Requests go to OpenRouter with zero data retention enforced on
+every call (`provider.zdr`, `data_collection: deny`), so OpenRouter refuses
+rather than routing to an endpoint that keeps prompts. What the user typed —
+field values, autofill, contenteditable drafts — is never sent, and URLs go
+without query or fragment. Still: **don't run `jev` on pages the user would not
+want described to a third party** (banking, medical, other people's private
+messages) — do those steps with plain `$BB`.
+
+Key: `OPENROUTER_API_KEY`, else `~/.claude-browser-bridge/openrouter.key`.
+
 ## Several browsers at once
 
 Each extension install announces a **profile label**, and commands name the
