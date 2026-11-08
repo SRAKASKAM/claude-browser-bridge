@@ -305,15 +305,27 @@ function setAttention(tabId, on) {
 
 chrome.tabs.onRemoved.addListener((tabId) => setAttention(tabId, false));
 
-/** Minimize the agent window unless the user is in it or has a step open in it. */
-async function minimizeAgentWindow(windowId) {
+/** Minimize the agent window unless the user is in it or has a step open in it.
+ *
+ * `ownerTabId` is the tab of a human step that just finished: then the window
+ * goes back even though the user is in it — he came for that step, and it is
+ * done — but only while that tab is the one in front. Switched to another tab
+ * there, he is doing something else, and the window stays.
+ */
+async function minimizeAgentWindow(windowId, ownerTabId = null) {
   const win = await chrome.windows.get(windowId, { populate: true });
   if (win.state === "minimized") return { hidden: true };
-  if (win.focused) return { hidden: false, reason: "the user is in it" };
+  const front = win.tabs.find((t) => t.active);
+  if (ownerTabId !== null) {
+    if (!front || front.id !== ownerTabId) return { hidden: false, reason: "the user switched to another tab there" };
+  } else if (win.focused) {
+    return { hidden: false, reason: "the user is in it" };
+  }
   const asked = await attentionTabs();
   if (win.tabs.some((t) => asked.includes(t.id))) return { hidden: false, reason: "a human step is open in it" };
   await chrome.windows.update(windowId, { state: "minimized" });
-  return { hidden: true };
+  // Whether the user was in it: only then is he handed back to his own app.
+  return { hidden: true, wasFocused: win.focused };
 }
 
 // A restored session brings the agent window back in whatever state it was.
@@ -418,7 +430,7 @@ async function dispatch(op, args) {
     hide: async () => {
       const id = await agentWindowId();
       if (id === null) return { hidden: false };
-      return await minimizeAgentWindow(id);
+      return await minimizeAgentWindow(id, typeof args.owner === "number" ? args.owner : null);
     },
 
     // Mark what the user has to do himself: a red outline on each selector and
@@ -430,6 +442,13 @@ async function dispatch(op, args) {
       const found = await inPage(
         tab.id,
         (selectors, message) => {
+          // When the user last typed here — the step is not over mid-keystroke.
+          if (!window.__claudeTyping) {
+            window.__claudeTyping = true;
+            const mark = () => (window.__claudeLastKey = Date.now());
+            addEventListener("keydown", mark, true);
+            addEventListener("input", mark, true);
+          }
           const hits = [];
           selectors.forEach((sel) => {
             let el = null;
@@ -605,7 +624,10 @@ async function dispatch(op, args) {
           returnByValue: true,
           awaitPromise: true,
         });
-        if (res.exceptionDetails) throw new Error(res.exceptionDetails.text || "eval threw");
+        if (res.exceptionDetails) {
+          const d = res.exceptionDetails;
+          throw new Error((d.exception && d.exception.description) || d.text || "eval threw");
+        }
         return { value: res.result.value };
       }
       const value = await inPage(tab.id, (code) => eval(code), [args.expression]);

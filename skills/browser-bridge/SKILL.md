@@ -194,24 +194,46 @@ A password, a 2FA code, a payment, a button bridge clicks cannot press. Do not
 raise the window and do not just write in chat:
 
 ```bash
-$BB ask "Enter the SMS code and press Confirm" 'input[name=otp]' 'button[type=submit]'
+$BB ask "Enter the SMS code and press Confirm" 'input[name=otp]' 'button[type=submit]' \
+    --until-gone 'input[name=otp]'          # run it in the background: it waits
 ```
 
 The page gets a red outline on each selector (the first is scrolled into view)
 and a red bar on top with the message. Then `bb` runs the notification hook at
 `~/.claude-browser-bridge/notify`, if there is one, with
-`show <key> <title> <message> <reveal command>`; clicking the notification is
+`show <key> <title> <message> <reveal command>` (and later
+`dismiss <key> [return]`, where `return` means "hand focus back to the app the
+user came from"); clicking the notification is
 what brings that window and tab to the front. Without a hook, `bb ask` says so
-— tell the user in chat, still without raising anything.
+(`"notified": false`) — tell the user in chat, still without raising anything.
 
-While a step is open, nothing minimizes the window — not another agent's
-`bb open`, not its `ask-done` — so the user can switch app to fetch a code.
-Then poll for the step being done (password field gone, URL left `/login`) and
-clean up:
+**Give it a done condition and it closes the step by itself.** It polls the
+page every 2 s; once the condition holds twice in a row and the user has
+stopped typing for 3 s, it clears the marks, dismisses the notification,
+minimizes the window and returns `"done": true`. If he had clicked the
+notification and was still in that window, he is handed back to the app he
+came from. A condition that already holds before he acts (a selector typo, a
+field not rendered yet or inside an iframe — conditions see only the top frame)
+is refused up front, and so is one that throws (`:has-text` is not CSS). Typing
+inside an iframe (card fields, 3-D Secure) is not seen by the typing guard.
+After `"done": true`, check the outcome before going on — a wrong code can look
+like a gone field. One open ask per tab: stop a background `bb ask --until`
+before asking again on the same tab.
 
-```bash
-$BB ask-done        # clears the outline, dismisses the notification, minimizes the window again
-```
+- `--until-gone SELECTOR` — the field or dialog is gone, page fully loaded (the usual one)
+- `--until-url TEXT` — the URL now contains TEXT (reached `/dashboard`)
+- `--until JS` — any page expression that is truthy once done, e.g. left the login
+  page: `--until '!location.href.includes("/login")'`
+- `--timeout SECONDS` (default 600) — then it returns `ok: false`, marks still up:
+  remind the user and ask again
+
+If he keeps typing for 30 s, or switched to another tab in the agent window,
+the window stays open (`"reason": "the user switched to another tab there"`). While a step
+is open, nothing else minimizes the window either — not another agent's
+`bb open` — so he can switch app to fetch a code.
+
+An ask without a done condition returns at once; close it yourself with
+`$BB ask-done` (same cleanup) once you have seen the step through.
 
 ## Operations
 
@@ -233,8 +255,8 @@ $BB type 'input[name=email]' 'you@example.com' --clear
 $BB key Enter                                # Enter Tab Escape Backspace ArrowUp ArrowDown
 $BB eval 'location.href'
 $BB waitfor '.results'                       # selector, or bare text
-$BB ask "message" [selector ...]             # human step: red outline + notification
-$BB ask-done                                 # clear it, minimize the window again
+$BB ask "message" [selector ...] --until-gone SEL   # human step; waits, then cleans up itself
+$BB ask-done                                 # cleanup for an ask without --until
 $BB reveal [tabId]  /  $BB hide              # show your tab to the user (only when he asks) / back to the Dock
 $BB detach
 $BB raw '{"op":"clickAt","args":{...}}'      # any op, full args

@@ -17,8 +17,10 @@ default once with `use`; with a single browser connected it is inferred.
     bb shot
     bb eval 'location.href'
     bb wheel 800 450 -300 --ctrl   # zoom in at a point (Ctrl+wheel); no --ctrl = scroll
-    bb ask "Enter the SMS code" 'input[name=otp]'   # human step: red outline + banner
-    bb ask-done                    # clear it once the human has acted
+    bb ask "Enter the SMS code" 'input[name=otp]' --until-gone 'input[name=otp]'
+                                   # human step: red outline + banner; waits until done,
+                                   # then clears it and minimizes the window again
+    bb ask-done                    # the same cleanup, for an ask without --until
     bb close                       # close your tab and unpin
     bb raw '{"op":"clickAt","args":{"x":120,"y":340}}'
 
@@ -67,7 +69,7 @@ UNPINNED_OPS = {"tabs", "activate", "whoami", "openTab", "newWindow", "hide"}
 
 # Optional per-machine hook that shows the human a notification for `bb ask`:
 #   notify show <key> <title> <body> <command to run on click>
-#   notify dismiss <key>
+#   notify dismiss <key> [return]   # return: hand focus back to the app the human came from
 NOTIFY_HOOK = HOME / "notify"
 
 # Pins older than this point at tabs long gone.
@@ -233,15 +235,82 @@ def notify(*args: str) -> bool:
         return False
 
 
+# How long the page must be free of keystrokes before a finished step closes,
+# and how long to wait for that before leaving the window up after all.
+TYPING_QUIET_S = 3
+TYPING_WAIT_MAX_S = 30
+POLL_S = 2
+
+# True once the page has had no keystrokes for TYPING_QUIET_S. Installs its own
+# listener on a page the user navigated to after the ask, counting from then.
+IDLE_JS = (
+    "(() => { if (!window.__claudeTyping) { window.__claudeTyping = true;"
+    " const m = () => (window.__claudeLastKey = Date.now());"
+    " addEventListener('keydown', m, true); addEventListener('input', m, true);"
+    " window.__claudeLastKey = Date.now(); }"
+    f" return Date.now() - (window.__claudeLastKey || 0) > {TYPING_QUIET_S * 1000}; }})()"
+)
+
+
+def take_flag(argv: list[str], name: str) -> tuple[list[str], str | None]:
+    if name not in argv:
+        return argv, None
+    i = argv.index(name)
+    if i + 1 >= len(argv):
+        sys.exit(f"{name} needs a value")
+    return argv[:i] + argv[i + 2:], argv[i + 1]
+
+
+def done_condition(argv: list[str]) -> tuple[list[str], str | None]:
+    """The JS expression that is truthy once the human's step is done, if any."""
+    argv, js = take_flag(argv, "--until")
+    argv, gone = take_flag(argv, "--until-gone")
+    argv, url = take_flag(argv, "--until-url")
+    if sum(x is not None for x in (js, gone, url)) > 1:
+        sys.exit("give one of --until, --until-gone, --until-url")
+    if "" in (js, gone, url):
+        sys.exit("an --until flag needs a non-empty value")
+    if gone:
+        # A page still loading has no field yet — that is not "gone".
+        js = f"document.readyState === 'complete' && !document.querySelector({json.dumps(gone)})"
+    elif url:
+        js = f"location.href.includes({json.dumps(url)})"
+    return argv, js
+
+
 def ask(argv: list[str], profile: str | None) -> dict:
     """Hand a step to the human without raising any window.
 
     The page gets a red outline on each selector and a red bar with the message;
-    the human gets a notification whose click reveals exactly this tab.
+    the human gets a notification whose click reveals exactly this tab. With a
+    done condition it waits for the step and then cleans up by itself — clears
+    the marks, dismisses the notification, minimizes the window — because an
+    agent told to do that afterwards eventually forgets.
     """
+    argv, until = done_condition(argv)
+    argv, timeout_arg = take_flag(argv, "--timeout")
     if not argv:
-        sys.exit('usage: bb ask "what the human must do" [selector ...]')
+        sys.exit('usage: bb ask "what the human must do" [selector ...] '
+                 "[--until JS | --until-gone SELECTOR | --until-url TEXT] [--timeout SECONDS]")
+    if timeout_arg is not None and until is None:
+        sys.exit("--timeout only applies with a done condition (--until, --until-gone, --until-url)")
+    try:
+        timeout = 600.0 if timeout_arg is None else float(timeout_arg)
+    except ValueError:
+        sys.exit(f"--timeout takes seconds, got {timeout_arg!r}")
     message, selectors = argv[0], argv[1:]
+    if until is not None and (tab := pinned_tab(profile)) is not None:
+        # Checked before anything is shown. A condition that throws (not CSS:
+        # `:has-text`, a JS typo) would never come true; one that already holds
+        # (a selector typo, a field not rendered yet or inside an iframe) would
+        # report a step as done that nobody did.
+        value, error = page_eval(until, tab, profile)
+        if error and error != "transient":
+            return {"ok": False, "done": False, "error": f"the done condition fails in the page: {error}"}
+        if value:
+            return {"ok": False, "done": False,
+                    "error": "the done condition already holds before the human acted — check it "
+                             "(selector typo? field not rendered yet, or inside an iframe?)"}
     out = post("attention", {"message": message, "selectors": selectors}, profile)
     if not out.get("ok"):
         return out
@@ -260,14 +329,80 @@ def ask(argv: list[str], profile: str | None) -> dict:
     if not out["notified"]:
         out["note"] = (f"no notification shown (hook {NOTIFY_HOOK} missing or failed) — "
                        "tell the human yourself; do not raise the window")
+    if until is None:
+        return out
+    deadline = time.time() + timeout
+    hits = 0
+    while time.time() < deadline:
+        value, error = page_eval(until, tab, profile)
+        if error == "gone":
+            notify("dismiss", f"{who}:{tab}")
+            return {**out, "ok": False, "done": False, "error": "your tab is gone — the user closed it"}
+        # Twice in a row: a re-render or a reload after a wrong code can drop
+        # the field for a moment while the step is still the user's.
+        hits = hits + 1 if value else 0
+        if hits >= 2:
+            out["done"] = True
+            out["finish"] = finish(tab, who, profile)
+            return out
+        time.sleep(POLL_S)
+    out["ok"] = False
+    out["done"] = False
+    out["error"] = "timed out waiting for the human — the marks and the notification are still up"
     return out
+
+
+def page_eval(expression: str, tab: int, profile: str | None) -> tuple[object, str | None]:
+    """Evaluate in the tab: (value, None), or (None, why it failed).
+
+    "gone" — the tab was closed; "transient" — the bridge or a navigating page
+    did not answer; anything else is the page's own error message.
+    """
+    out = post("eval", {"expression": expression, "tabId": tab}, profile)
+    if out.get("ok"):
+        return out.get("result", {}).get("value"), None
+    error = str(out.get("error", ""))
+    if "No tab with id" in error:
+        return None, "gone"
+    if "http_status" in out or "unreachable" in error or "context" in error.lower():
+        return None, "transient"
+    return None, error
+
+
+def page_value(expression: str, tab: int, profile: str | None):
+    """Evaluate in the tab; any failure counts as not-yet."""
+    return page_eval(expression, tab, profile)[0]
+
+
+def finish(tab: int, who: str, profile: str | None, cleared: bool = False) -> dict:
+    """Close a human step: marks off, notification gone, window back to the Dock.
+
+    Not mid-keystroke: the page must have been quiet for a few seconds; if the
+    user keeps typing, the window stays up. It also stays up if he switched to
+    another tab in it. Focus goes back to the app he came from only when the
+    window really was minimized from under him.
+    """
+    key = f"{who}:{tab}"
+    if not cleared:
+        post("clearAttention", {"tabId": tab}, profile)
+    deadline = time.time() + TYPING_WAIT_MAX_S
+    while page_value(IDLE_JS, tab, profile) is False:
+        if time.time() > deadline:
+            notify("dismiss", key)
+            return {"hidden": False, "reason": "the user is still typing there"}
+        time.sleep(1)
+    hide = post("hide", {"owner": tab}, profile)
+    result = hide.get("result", hide)
+    give_back = bool(result.get("hidden") and result.get("wasFocused"))
+    notify("dismiss", key, *(["return"] if give_back else []))
+    return result
 
 
 def ask_done(profile: str | None) -> dict:
     out = post("clearAttention", {}, profile)
     if out.get("ok"):
-        notify("dismiss", f"{out.get('profile') or profile or ''}:{out['result']['cleared']}")
-        post("hide", {}, profile)
+        who = out.get("profile") or profile or ""
+        out["finish"] = finish(out["result"]["cleared"], who, profile, cleared=True)
     return out
 
 
