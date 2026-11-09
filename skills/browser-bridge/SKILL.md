@@ -1,6 +1,6 @@
 ---
 name: browser-bridge
-description: Drive the user's own everyday Chrome — the real profile, already logged in — through a small local extension instead of a debugging port. Use whenever the user asks to open or drive a browser, check a page, test a flow, reproduce a UI bug, log into a site, fill a form, scrape something behind a login, or verify a change in a real browser. Also covers first-time setup ("set up the browser bridge", "connect my Chrome") and multi-profile use, where each Chrome profile is addressed by its own label.
+description: Drive the user's own everyday Chrome — the real profile, already logged in — through a small local extension instead of a debugging port. Use whenever the user asks to open or drive a browser, check a page, test a flow, reproduce a UI bug, log into a site, fill a form, scrape something behind a login, or verify a change in a real browser. Also records a browser session while the user clicks — a bug reproduction or a behaviour to investigate — into a folder (console, network, steps, screenshots, DOM) another agent can debug from offline. Also covers first-time setup ("set up the browser bridge", "connect my Chrome") and multi-profile use, where each Chrome profile is addressed by its own label.
 ---
 
 # Browser bridge
@@ -235,6 +235,63 @@ is open, nothing else minimizes the window either — not another agent's
 An ask without a done condition returns at once; close it yourself with
 `$BB ask-done` (same cleanup) once you have seen the step through.
 
+## Recording a browser session
+
+When the user should *show* something rather than have you drive — reproduce a
+bug, walk through a behaviour he wants investigated — record his own tab while
+he clicks, and hand the result to whoever debugs it:
+
+```bash
+$BB record start --profile work      # his active tab in his own window; --tab ID for another
+# tell him: "do it in that tab, say stop when done" — then wait for his "stop"
+$BB record stop --name "checkout total is wrong"
+# -> {"path": ".../.recordings/2026-11-09-1130-checkout-total-is-wrong", "report": ".../report.md"}
+$BB record status
+```
+
+It records the tab he is looking at — never the agent window — plus every tab
+or popup opened from it, across navigations. Chrome shows its yellow
+"started debugging this browser" bar while it runs; **Cancel on that bar ends
+the recording** (the report says so). The bundle lands in
+`./.recordings/<YYYY-MM-DD-HHMM>-<slug>/` under the cwd at start (`--out DIR`
+to change), and `.recordings/` is added to `.git/info/exclude`.
+
+Start with `report.md`: errors first — console errors, uncaught exceptions with
+stacks, browser log errors, HTTP ≥ 400 and failed requests, each "after step N" —
+then every step with its screenshot, the DOM after it, and the console and
+network entries that followed it. Next to it:
+
+| File | What |
+|---|---|
+| `actions.jsonl` | the steps: click / input / submit / key / navigate, selector, target text, url |
+| `console.jsonl` | console, exceptions, browser log, each with its step |
+| `network.jsonl` | one request per line: method, url, status, headers, timing, failure, body file |
+| `bodies/` | response bodies of XHR / fetch / documents, 256 KB max; no JS, CSS, images |
+| `shots/NNN.jpg` | a screenshot per step |
+| `dom/NNN.html`, `dom/err-*.html` | the DOM after each step and at each error, rebuilt from rrweb; the clicked element carries `data-recorded-target` |
+| `rrweb.json` | the raw rrweb events, for a human replay with rrweb-player |
+
+**Secrets are redacted before anything touches the disk**, the raw stream in
+`~/.claude-browser-bridge/recordings/` included: password, OTP, card and hidden
+input values are masked inside the page; Authorization, Cookie, Set-Cookie and
+token headers, token fields in JSON / form / multipart / HTML bodies, JWTs,
+Bearer tokens and secret-named URL params (`token`, `X-Amz-Signature`, …) become
+`[redacted]`; in screenshots those fields are drawn as dots. Not covered: fields
+inside cross-origin iframes (card widgets, 3-D Secure) show in screenshots, and
+whatever the page displays as plain text is recorded as is — say so before
+recording a banking page.
+
+- One recording per browser profile at a time. `record start` refusing with "a
+  recording … is already running" after a lost reply: `bb record status` names
+  it, `bb record stop --rec <id>` stops it.
+- A page that freezes on a click shows up under "Slowness": frames of 100 ms+ with
+  the scripts that ran in them, and mutation batches of 500+ nodes with what was
+  rendered en masse. The recorder itself serializes those mutations, so a
+  recorded freeze runs somewhat longer than an unrecorded one.
+- It shares the debugger session with the other ops, so you can still `bb shot`
+  or `eval` the recorded tab; `bb detach` on it is refused until you stop.
+- DevTools open on that tab blocks the recording (one debugger per tab).
+
 ## Operations
 
 ```bash
@@ -257,6 +314,8 @@ $BB eval 'location.href'
 $BB waitfor '.results'                       # selector, or bare text
 $BB ask "message" [selector ...] --until-gone SEL   # human step; waits, then cleans up itself
 $BB ask-done                                 # cleanup for an ask without --until
+$BB record start [--tab ID] [--out DIR]      # record the user's tab while he shows something
+$BB record stop [--name TEXT]  /  $BB record status   # -> ./.recordings/<time>-<slug>/report.md
 $BB reveal [tabId]  /  $BB hide              # show your tab to the user (only when he asks) / back to the Dock
 $BB detach
 $BB raw '{"op":"clickAt","args":{...}}'      # any op, full args

@@ -23,6 +23,10 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
+import queue
+import sys
+import threading
 import json
 import os
 import pathlib
@@ -31,6 +35,8 @@ import uuid
 
 import uvicorn
 from fastapi import FastAPI, Header, HTTPException, Request, WebSocket, WebSocketDisconnect
+
+import recording
 
 # State lives outside the plugin: the plugin folder is replaced wholesale on
 # every update, and nothing that must survive an update — least of all a secret
@@ -152,6 +158,34 @@ class Registry:
 registry = Registry()
 
 
+# Recording events are redacted and written by one thread, in arrival order:
+# redacting a multi-megabyte DOM snapshot on the event loop would stall every
+# other op meanwhile. A big stack, because a deep DOM is a deep JSON tree.
+_rec_queue: queue.Queue = queue.Queue()
+
+
+def _write_recordings() -> None:
+    sys.setrecursionlimit(20000)
+    while True:
+        msg = _rec_queue.get()
+        try:
+            recording.append(HOME, msg)
+        except Exception as exc:
+            print(f"[bridge] could not write recording event: {exc}", flush=True)
+            # Leave a mark, so the report says something is missing.
+            with contextlib.suppress(Exception):
+                recording.append(HOME, {**{k: msg.get(k) for k in ("op", "rec", "t", "tabId")},
+                                        "method": "rec.dropped",
+                                        "params": {"event": msg.get("method"), "reason": str(exc)[:200]}})
+        finally:
+            _rec_queue.task_done()
+
+
+threading.stack_size(256 * 1024 * 1024)
+threading.Thread(target=_write_recordings, name="recordings", daemon=True).start()
+threading.stack_size(0)
+
+
 def _persist_screenshot(result: dict) -> dict:
     """Move a base64 screenshot out of the JSON payload and onto disk.
 
@@ -192,6 +226,11 @@ async def cmd(request: Request, x_bridge_token: str = Header(default="")) -> dic
     timeout = float(body.get("timeout") or DEFAULT_TIMEOUT)
     client = registry.pick(body.get("profile"))
     reply = await client.call(op, body.get("args") or {}, timeout)
+    if op == "recordStop":
+        # Everything the extension sent before this reply is queued; let it reach
+        # the disk before `bb` builds the bundle from it.
+        with contextlib.suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(asyncio.to_thread(_rec_queue.join), 60)
     if reply.get("ok") and isinstance(reply.get("result"), dict):
         reply["result"] = _persist_screenshot(reply["result"])
     reply["profile"] = client.profile
@@ -238,6 +277,10 @@ async def ext_socket(ws: WebSocket) -> None:
                     registry.add(client)
                     print(f"[bridge] relabelled -> '{new}'", flush=True)
                 continue
+            # `bb record` events: redacted and written to disk as they arrive.
+            if msg.get("op") == "rec":
+                _rec_queue.put(msg)
+                continue
             client.resolve(msg)
     except WebSocketDisconnect:
         pass
@@ -250,4 +293,5 @@ async def ext_socket(ws: WebSocket) -> None:
 
 if __name__ == "__main__":
     print(f"[bridge] listening on http://127.0.0.1:{PORT} (ws /ext)", flush=True)
-    uvicorn.run(app, host="127.0.0.1", port=PORT, log_level="warning")
+    # A recording's full DOM snapshot, styles inlined, can run to many megabytes.
+    uvicorn.run(app, host="127.0.0.1", port=PORT, log_level="warning", ws_max_size=128 * 1024 * 1024)

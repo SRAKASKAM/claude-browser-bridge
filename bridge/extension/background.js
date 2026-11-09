@@ -3,6 +3,8 @@
 // every time the plugin updates, and a secret sitting in a repo checkout is a
 // secret that eventually gets committed.
 
+import { createRecorder } from "./recorder.js";
+
 const DEFAULT_PORT = 8799;
 const CDP_VERSION = "1.3";
 
@@ -134,6 +136,8 @@ async function connect() {
       backoffMs = 500;
       ws.send(JSON.stringify({ token, profile, userAgent: navigator.userAgent }));
       console.log(`[bridge] connected as ${profile || "unnamed"}`);
+      // Recording events that arrived while the socket was down.
+      recorder.flush();
     };
 
     ws.onmessage = async (event) => {
@@ -362,6 +366,27 @@ async function inAgentWindow(tab) {
   return tab.windowId === (await agentWindowId());
 }
 
+// ---------------------------------------------------------------- recording
+//
+// `bb record`: see recorder.js. The bridge only supplies the transport (this
+// socket, to the server that redacts and stores) and its debugger sessions.
+
+const recorder = createRecorder({
+  send: (msg) => {
+    if (!socket || socket.readyState !== WebSocket.OPEN) return false;
+    socket.send(msg);
+    return true;
+  },
+  cdp,
+  attach,
+  isAttached: (tabId) => attached.has(tabId),
+  release: async (tabId) => {
+    await chrome.debugger.detach({ tabId });
+    attached.delete(tabId);
+  },
+  // The agents' own tabs are never "the tab the user is looking at".
+  excludedWindowId: agentWindowId,
+});
 
 // --------------------------------------------------------------- operations
 
@@ -753,9 +778,14 @@ async function dispatch(op, args) {
       return { reloading: true };
     },
 
+    recordStart: async () => await recorder.start(args),
+    recordStop: async () => await recorder.stop(args),
+    recordStatus: async () => recorder.status(),
+
     detach: async () => {
       // Not targetTab: in the agent window that would attach first.
       const tab = await chrome.tabs.get(args.tabId);
+      if (recorder.isRecording(tab.id)) throw new Error("this tab is being recorded — `bb record stop` first");
       if (attached.has(tab.id)) {
         await chrome.debugger.detach({ tabId: tab.id });
         attached.delete(tab.id);

@@ -82,6 +82,13 @@ logged into your email, your bank and your messages. Be clear-eyed about it:
 - Chrome will show a "debugging this browser" banner while a tab is attached.
   That banner is doing its job — it means input really is going through the
   debugger. Do not look for a way to hide it.
+- `bb record` (recording a session while you click) also uses `webNavigation`,
+  to follow popups opened from the recorded tab. It writes what the page did —
+  console, requests with headers and bodies, DOM history, screenshots — to
+  `~/.claude-browser-bridge/recordings/` (kept a week) and to a
+  `.recordings/` folder in the agent's working directory. Passwords, one-time
+  codes, card fields, auth headers, cookies and token fields are redacted before
+  anything is written; text the page shows in plain sight is not.
 - The bundled skill tells Claude to confirm the identity before typing, never to
   enter credentials or one-time codes, and to ask before anything irreversible.
   That is guidance to a model, not a sandbox. It is not a substitute for
@@ -96,6 +103,8 @@ a perfectly reasonable conclusion.
 |---|---|
 | `bridge/server.py` | Local HTTP↔WebSocket router, one server for many profiles |
 | `bridge/bb.py` | The CLI Claude actually calls |
+| `bridge/recording.py` | `bb record`: redacts the recorded stream, builds the `.recordings/` bundle |
+| `bridge/extension/recorder.js` | The recorder itself, a self-contained module (with vendored rrweb) |
 | `bridge/extension/` | The MV3 extension source (read it — you are installing it) |
 | `bridge/setup.sh` / `setup.ps1` | Token, state dir, extension sync |
 | `bridge/macos/` | Optional macOS conveniences — see below |

@@ -22,6 +22,9 @@ default once with `use`; with a single browser connected it is inferred.
                                    # then clears it and minimizes the window again
     bb ask-done                    # the same cleanup, for an ask without --until
     bb close                       # close your tab and unpin
+    bb record start [--tab ID] [--out DIR]   # record the user's active tab (a bug repro, a behaviour to study)
+    bb record stop [--name "what broke"]     # -> ./.recordings/<time>-<slug>/report.md
+    bb record status
     bb raw '{"op":"clickAt","args":{"x":120,"y":340}}'
 
     ... --profile work         # any command, explicit target
@@ -34,12 +37,17 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import re
 import shlex
 import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
+import uuid
+
+import recording
 
 # Same state dir as the server — see the note in server.py.
 HOME = pathlib.Path(os.getenv("BROWSER_BRIDGE_HOME", pathlib.Path.home() / ".claude-browser-bridge"))
@@ -65,7 +73,8 @@ SESSION_KEY = "".join(c if c.isalnum() or c in "-_" else "_" for c in SESSION)[:
 DEFAULT_PROFILE_FILE = HOME / f"default_profile.{SESSION_KEY}"
 
 # Ops that must never be silently retargeted at the pinned tab.
-UNPINNED_OPS = {"tabs", "activate", "whoami", "openTab", "newWindow", "hide"}
+# Recording targets the user's own tab, never the agent's pinned one.
+UNPINNED_OPS = {"tabs", "activate", "whoami", "openTab", "newWindow", "hide", "recordStart", "recordStop"}
 
 # Optional per-machine hook that shows the human a notification for `bb ask`:
 #   notify show <key> <title> <body> <command to run on click>
@@ -406,6 +415,133 @@ def ask_done(profile: str | None) -> dict:
     return out
 
 
+def rec_state_file(profile: str | None) -> pathlib.Path:
+    """The running recording, per profile and per agent — like pins."""
+    return HOME / "recordings" / f"current.{profile or '_inferred'}.{SESSION_KEY}.json"
+
+
+def git_exclude(base: pathlib.Path) -> None:
+    """Keep .recordings/ out of commits without touching the repo's own .gitignore."""
+    for d in [base, *base.parents]:
+        git = d / ".git"
+        if git.is_dir():
+            info = git
+        elif git.is_file():  # a worktree: "gitdir: <path>", exclude lives in the common dir
+            text = git.read_text().strip()
+            if not text.startswith("gitdir:"):
+                return
+            info = (d / text.split(":", 1)[1].strip()).resolve()
+            common = info / "commondir"
+            if common.exists():
+                info = (info / common.read_text().strip()).resolve()
+        else:
+            continue
+        exclude = info / "info" / "exclude"
+        text = exclude.read_text() if exclude.exists() else ""
+        if ".recordings/" not in (line.strip() for line in text.splitlines()):
+            exclude.parent.mkdir(parents=True, exist_ok=True)
+            with open(exclude, "a") as fh:
+                fh.write(("\n" if text and not text.endswith("\n") else "") + ".recordings/\n")
+        return
+
+
+def record(argv: list[str], profile: str | None) -> dict:
+    sub = argv[0] if argv else "status"
+    state_file = rec_state_file(profile)
+    if sub == "stop" and not state_file.exists():
+        # Started with --profile and stopped without one, or the other way round:
+        # this session's only recording of that profile is the one meant. A
+        # different profile named outright is refused.
+        mine = [f for f in (HOME / "recordings").glob(f"current.*.{SESSION_KEY}.json")
+                if profile is None or json.loads(f.read_text()).get("profile") == profile]
+        if len(mine) == 1:
+            state_file = mine[0]
+    state = json.loads(state_file.read_text()) if state_file.exists() else None
+
+    if sub == "status":
+        out = {"ok": True, "active": state is not None, **({"state": state} if state else {})}
+        if state is None:
+            # One this session lost track of (a reply that never came back) still blocks starts.
+            browser = post("recordStatus", {}, profile)
+            if browser.get("ok") and (browser.get("result") or {}).get("recording"):
+                out["browser"] = browser["result"]
+                out["fix"] = f"a recording is running in the browser — `bb record stop --rec {browser['result'].get('rec')}`"
+        return out
+
+    if sub == "start":
+        rest, tab = take_flag(argv[1:], "--tab")
+        rest, out_base = take_flag(rest, "--out")
+        if state is not None:
+            return {"ok": False, "error": f"a recording is already running ({state['rec']}) — "
+                    "`bb record stop` it first", "state": state}
+        recording.prune(HOME)
+        rec = uuid.uuid4().hex[:12]
+        args: dict = {"rec": rec}
+        if tab is not None:
+            if not tab.isdigit():
+                return {"ok": False, "error": f"--tab takes a tab id from `bb tabs`, got {tab!r}"}
+            args["tabId"] = int(tab)
+        out = post("recordStart", args, profile)
+        if not out.get("ok"):
+            # Started in the browser but the reply never came back: no state here,
+            # and the browser refuses every new start until it is stopped.
+            running = re.search(r"already running \((\w+)\)", str(out.get("error", "")))
+            if running:
+                out["fix"] = (f"a recording this session does not know about is running — if it is yours, "
+                              f"`bb record stop --rec {running.group(1)}` stops it and builds its bundle here")
+            return out
+        result = out.get("result") or {}
+        state = {"rec": rec, "profile": out.get("profile") or profile, "started": time.time(),
+                 "out": str(pathlib.Path(out_base or os.getcwd()).resolve()),
+                 "tabId": result.get("tabId"), "url": result.get("url"), "title": result.get("title")}
+        state_file.parent.mkdir(parents=True, exist_ok=True)
+        state_file.write_text(json.dumps(state))
+        return {**out, "recording": rec,
+                "next": "tell the user to do in that tab what should be recorded (reproduce the bug, walk through the behaviour) and to say when to stop; "
+                        "then run `bb record stop --name \"<what broke>\"`"}
+
+    if sub == "stop":
+        rest, name = take_flag(argv[1:], "--name")
+        _, orphan = take_flag(rest, "--rec")
+        if state is None and orphan:
+            if not re.fullmatch(r"\w{1,64}", orphan):
+                return {"ok": False, "error": f"bad recording id {orphan!r}"}
+            state = {"rec": orphan, "profile": profile, "started": time.time(), "out": os.getcwd()}
+        if state is None:
+            return {"ok": False, "error": "no recording is running in this session — `bb record start` first"}
+        stop = post("recordStop", {"rec": state["rec"]}, state.get("profile") or profile)
+        raw = recording.raw_dir(HOME, state["rec"])
+        if not (raw / "events.jsonl").exists():
+            state_file.unlink(missing_ok=True)
+            return {"ok": False, "error": "nothing was recorded — no events reached the bridge server",
+                    "stop": stop}
+        info = recording.start_info(raw)
+        host = urllib.parse.urlsplit(info.get("url") or state.get("url") or "").hostname or ""
+        slug = recording.slug(name or info.get("title") or state.get("title") or host) or "session"
+        stamp = time.strftime("%Y-%m-%d-%H%M", time.localtime(state["started"]))
+        base = pathlib.Path(state["out"])
+        dest = base / ".recordings" / f"{stamp}-{slug}"
+        n = 2
+        while dest.exists():
+            dest = base / ".recordings" / f"{stamp}-{slug}-{n}"
+            n += 1
+        try:
+            recording.run_deep(recording.build_bundle, raw, dest, name)
+        except Exception as exc:
+            # A failed build must not leave a recording that blocks every later start.
+            state_file.unlink(missing_ok=True)
+            return {"ok": False, "error": f"could not build the bundle: {exc!r}", "raw": str(raw)}
+        git_exclude(base)
+        state_file.unlink(missing_ok=True)
+        out = {"ok": True, "path": str(dest), "report": str(dest / "report.md")}
+        if not stop.get("ok"):
+            out["warning"] = ("the extension did not confirm the stop — the bundle holds what reached "
+                              f"the server: {stop.get('error')}")
+        return out
+
+    sys.exit("usage: bb record start [--tab ID] [--out DIR] | stop [--name TEXT] [--rec ID] | status")
+
+
 def take_profile_flag(argv: list[str]) -> tuple[list[str], str | None]:
     """Pull --profile NAME / --profile=NAME out of anywhere in the argv."""
     out: list[str] = []
@@ -476,6 +612,11 @@ def main() -> None:
         out = post("closeTab", {}, profile)
         if out.get("ok"):
             pin_file(profile).unlink(missing_ok=True)
+        print(json.dumps(out, indent=2, ensure_ascii=False))
+        sys.exit(0 if out.get("ok") else 1)
+
+    if argv[0] == "record":
+        out = record(argv[1:], profile)
         print(json.dumps(out, indent=2, ensure_ascii=False))
         sys.exit(0 if out.get("ok") else 1)
 
