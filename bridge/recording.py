@@ -30,6 +30,7 @@ import pathlib
 import re
 import shutil
 import time
+import unicodedata
 import urllib.parse
 
 # What the bundle keeps of a body. The extension sends bodies whole (up to
@@ -601,8 +602,21 @@ def _console_entry(method: str, params: dict) -> dict | None:
     return None
 
 
+_TRANSLIT = str.maketrans({
+    "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ё": "yo", "ж": "zh",
+    "з": "z", "и": "i", "й": "y", "к": "k", "л": "l", "м": "m", "н": "n", "о": "o",
+    "п": "p", "р": "r", "с": "s", "т": "t", "у": "u", "ф": "f", "х": "kh", "ц": "ts",
+    "ч": "ch", "ш": "sh", "щ": "shch", "ъ": "", "ы": "y", "ь": "", "э": "e", "ю": "yu",
+    "я": "ya", "і": "i", "ў": "u", "ї": "yi", "є": "ye", "ґ": "g", "ł": "l", "ß": "ss",
+})
+
+
 def slug(text: str, limit: int = 40) -> str:
-    s = re.sub(r"[^a-z0-9]+", "-", (text or "").lower()).strip("-")
+    # A name is often typed in Russian or Polish: transliterate, don't drop it.
+    # NFC first: a pasted "й" may arrive as "и" plus a combining breve.
+    s = unicodedata.normalize("NFC", (text or "").lower()).translate(_TRANSLIT)
+    s = unicodedata.normalize("NFKD", s)
+    s = re.sub(r"[^a-z0-9]+", "-", s.encode("ascii", "ignore").decode()).strip("-")
     return s[:limit].strip("-")
 
 

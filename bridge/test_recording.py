@@ -20,6 +20,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import unicodedata
 import unittest
 import urllib.error
 import urllib.parse
@@ -861,6 +862,14 @@ class BbRecordTest(unittest.TestCase):
         slug = self.bundle_name(out).group(2)
         self.assertLessEqual(len(slug), 40)
         self.assertTrue(slug.startswith("very-long-bug-name-very"), slug)
+
+    def test_a_russian_or_polish_name_is_transliterated_not_dropped(self) -> None:
+        self.simulate(self.start())
+        _, out = self.stop("--name", "Фриз генератора отчётов, łódź")
+        self.assertEqual(self.bundle_name(out).group(2), "friz-generatora-otchyotov-lodz")
+
+    def test_a_decomposed_name_transliterates_like_a_composed_one(self) -> None:
+        self.assertEqual(load_recording().slug(unicodedata.normalize("NFD", "Мой ёж")), "moy-yozh")
 
     def test_out_base_defaults_to_the_cwd_at_start(self) -> None:
         elsewhere = self.root / "elsewhere"

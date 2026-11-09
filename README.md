@@ -105,6 +105,7 @@ a perfectly reasonable conclusion.
 | `bridge/bb.py` | The CLI Claude actually calls |
 | `bridge/recording.py` | `bb record`: redacts the recorded stream, builds the `.recordings/` bundle |
 | `bridge/extension/recorder.js` | The recorder itself, a self-contained module (with vendored rrweb) |
+| `commands/record-browser.md` | `/record-browser`: start recording, stop on "stop", sum up the report |
 | `bridge/extension/` | The MV3 extension source (read it — you are installing it) |
 | `bridge/setup.sh` / `setup.ps1` | Token, state dir, extension sync |
 | `bridge/macos/` | Optional macOS conveniences — see below |

@@ -249,6 +249,9 @@ $BB record stop --name "checkout total is wrong"
 $BB record status
 ```
 
+The user can do the whole round with `/record-browser [profile] [what]`: it
+starts, waits for "stop", and answers with the report's gist and a link.
+
 It records the tab he is looking at — never the agent window — plus every tab
 or popup opened from it, across navigations. Chrome shows its yellow
 "started debugging this browser" bar while it runs; **Cancel on that bar ends
