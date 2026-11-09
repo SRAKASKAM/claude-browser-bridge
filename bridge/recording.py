@@ -283,14 +283,6 @@ def read_events(raw: pathlib.Path) -> list[dict]:
     return events
 
 
-def start_info(raw: pathlib.Path) -> dict:
-    """The page the recording started on: {url, title}."""
-    for ev in read_events(raw):
-        if ev.get("method") == "rec.start":
-            return ev.get("params") or {}
-    return {}
-
-
 def prune(home: pathlib.Path, max_age_s: float = 7 * 24 * 3600) -> None:
     """Raw recordings are kept a week after the bundle is built, then dropped."""
     root = pathlib.Path(home) / "recordings"
@@ -633,6 +625,26 @@ def _body_ext(mime: str | None, body: str) -> str:
     if "xml" in mime:
         return "xml"
     return "txt"
+
+
+def finish(raw: pathlib.Path, parent: pathlib.Path, name: str | None = None,
+           started: float | None = None) -> pathlib.Path:
+    """Build the bundle into parent/<YYYY-MM-DD-HHMM>-<slug>/, a new folder, and return it.
+
+    The stamp is `started` (epoch seconds), else when the first event was
+    recorded; the slug is the name, else the start page's title, else its host."""
+    start = next((ev for ev in read_events(raw) if ev.get("method") == "rec.start"), {})
+    page = start.get("params") or {}
+    host = urllib.parse.urlsplit(page.get("url") or "").hostname or ""
+    tag = slug(name or page.get("title") or host) or "session"
+    if started is None:
+        started = (start.get("t") or time.time() * 1000) / 1000
+    stamp = time.strftime("%Y-%m-%d-%H%M", time.localtime(started))
+    parent = pathlib.Path(parent)
+    dest, n = parent / f"{stamp}-{tag}", 2
+    while dest.exists():
+        dest, n = parent / f"{stamp}-{tag}-{n}", n + 1
+    return run_deep(build_bundle, raw, dest, name)
 
 
 def build_bundle(raw: pathlib.Path, out_dir: pathlib.Path, name: str | None = None) -> pathlib.Path:

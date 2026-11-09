@@ -26,9 +26,31 @@
   .on { background: #17903f; }
   .off { background: #c02b2b; }
   .hint { margin-top: 9px; font-size: 11px; color: #9aa0aa; }
+  #rec { padding-bottom: 12px; margin-bottom: 12px; border-bottom: 1px solid #eceef2; }
+  #rec button.stop { background: #c02b2b; }
+  #rec button[hidden], #rec div[hidden] { display: none; }
+  #recNow { font-size: 12px; }
+  #recNow b { color: #c02b2b; }
+  #recPath { margin-top: 6px; font: 10px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; color: #6b7280; word-break: break-all; }
+  #recMsg { margin-top: 8px; font-size: 11px; color: #17903f; }
+  #recMsg.err { color: #c02b2b; }
+  details summary { cursor: pointer; font-size: 11px; color: #6b7280; margin-bottom: 8px; }
 </style>
 <h1>Claude Browser Bridge</h1>
 
+<section id="rec">
+  <div id="recNow" hidden></div>
+  <label for="recName">What is it about? (optional)</label>
+  <input id="recName" placeholder="checkout total is wrong" autocomplete="off" />
+  <button id="recStart">● Record this tab</button>
+  <button id="recStop" class="stop" hidden>■ Stop</button>
+  <div id="recMsg" hidden></div>
+  <div id="recPath" hidden></div>
+  <button id="recCopy" hidden>Copy for Claude</button>
+</section>
+
+<details id="pairing">
+<summary>Connection</summary>
 <label for="token">Pairing token</label>
 <input id="token" placeholder="paste from setup" autocomplete="off" spellcheck="false" />
 
@@ -38,4 +60,5 @@
 <button id="save">Save</button>
 <div id="status"><span class="dot off"></span>checking…</div>
 <div class="hint">Claude addresses this browser by its label. Use one label per Chrome profile; the token is the same on all of them.</div>
+</details>
 <script src="popup.js"></script>

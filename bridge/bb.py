@@ -43,7 +43,6 @@ import subprocess
 import sys
 import time
 import urllib.error
-import urllib.parse
 import urllib.request
 import uuid
 
@@ -515,18 +514,9 @@ def record(argv: list[str], profile: str | None) -> dict:
             state_file.unlink(missing_ok=True)
             return {"ok": False, "error": "nothing was recorded — no events reached the bridge server",
                     "stop": stop}
-        info = recording.start_info(raw)
-        host = urllib.parse.urlsplit(info.get("url") or state.get("url") or "").hostname or ""
-        slug = recording.slug(name or info.get("title") or state.get("title") or host) or "session"
-        stamp = time.strftime("%Y-%m-%d-%H%M", time.localtime(state["started"]))
         base = pathlib.Path(state["out"])
-        dest = base / ".recordings" / f"{stamp}-{slug}"
-        n = 2
-        while dest.exists():
-            dest = base / ".recordings" / f"{stamp}-{slug}-{n}"
-            n += 1
         try:
-            recording.run_deep(recording.build_bundle, raw, dest, name)
+            dest = recording.finish(raw, base / ".recordings", name, state["started"])
         except Exception as exc:
             # A failed build must not leave a recording that blocks every later start.
             state_file.unlink(missing_ok=True)

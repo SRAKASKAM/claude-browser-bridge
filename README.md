@@ -86,7 +86,8 @@ logged into your email, your bank and your messages. Be clear-eyed about it:
   to follow popups opened from the recorded tab. It writes what the page did —
   console, requests with headers and bodies, DOM history, screenshots — to
   `~/.claude-browser-bridge/recordings/` (kept a week) and to a
-  `.recordings/` folder in the agent's working directory. Passwords, one-time
+  `.recordings/` folder in the agent's working directory — or, for a recording
+  started from the extension's popup, to `~/Downloads/browser-recordings/`. Passwords, one-time
   codes, card fields, auth headers, cookies and token fields are redacted before
   anything is written; text the page shows in plain sight is not.
 - The bundled skill tells Claude to confirm the identity before typing, never to

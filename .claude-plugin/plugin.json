@@ -1,6 +1,6 @@
 {
   "name": "browser-bridge",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Let Claude drive the browser you already use — your real Chrome profile, already logged in, with trusted input events. No debugging flags, no throwaway profile.",
   "author": {
     "name": "Stanislau Stankevich",

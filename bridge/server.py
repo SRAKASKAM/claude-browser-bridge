@@ -25,6 +25,7 @@ import asyncio
 import base64
 import contextlib
 import queue
+import re
 import sys
 import threading
 import json
@@ -235,6 +236,59 @@ async def cmd(request: Request, x_bridge_token: str = Header(default="")) -> dic
         reply["result"] = _persist_screenshot(reply["result"])
     reply["profile"] = client.profile
     return reply
+
+
+# Where the popup's recordings go: no agent started them, so there is no agent
+# working directory to put them in.
+RECORDINGS_DIR = pathlib.Path(
+    os.getenv("BROWSER_BRIDGE_RECORDINGS_DIR", pathlib.Path.home() / "Downloads" / "browser-recordings")
+)
+
+
+def _stop_written(raw: pathlib.Path) -> bool:
+    """Whether the recording's rec.stop, its last event, has reached the disk."""
+    try:
+        with open(raw / "events.jsonl", "rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            fh.seek(max(0, fh.tell() - 65536))
+            return b'"rec.stop"' in fh.read()
+    except FileNotFoundError:
+        return False
+
+
+@app.post("/record/build")
+async def record_build(request: Request, x_bridge_token: str = Header(default="")) -> dict:
+    """Build the folder for a recording the extension's popup started and stopped."""
+    if x_bridge_token != TOKEN:
+        raise HTTPException(401, "bad or missing X-Bridge-Token")
+    body = await request.json()
+    rec = str((body.get("rec") if isinstance(body, dict) else "") or "")
+    if not re.fullmatch(r"\w{1,64}", rec):
+        raise HTTPException(400, f"bad recording id {rec!r}")
+    raw = recording.raw_dir(HOME, rec)
+    # This request came over its own connection, so the recording's tail may
+    # still be in flight on the extension's socket or in the write queue: wait
+    # until its last event, rec.stop, is on the disk.
+    deadline = time.monotonic() + (30 if (raw / "events.jsonl").exists() else 2)
+    while not _stop_written(raw) and time.monotonic() < deadline:
+        await asyncio.sleep(0.1)
+    with contextlib.suppress(asyncio.TimeoutError):
+        await asyncio.wait_for(asyncio.to_thread(_rec_queue.join), 60)
+    recording.prune(HOME)
+    if not (raw / "events.jsonl").exists():
+        return {"ok": False, "error": "nothing was recorded — no events reached the bridge server"}
+    try:
+        dest = await asyncio.to_thread(recording.finish, raw, RECORDINGS_DIR, body.get("name") or None)
+    except Exception as exc:
+        return {"ok": False, "error": f"could not build the bundle: {exc!r}"}
+    report = dest / "report.md"
+    return {
+        "ok": True,
+        "path": str(dest),
+        "report": str(report),
+        "handoff": f"A browser session I recorded: {report} — read it first; "
+        "the steps, console, network, screenshots and DOM are in the same folder.",
+    }
 
 
 @app.websocket("/ext")

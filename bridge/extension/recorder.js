@@ -12,13 +12,18 @@
 //   host.isAttached(tabId)     whether the host already holds a session on it
 //   host.release(tabId)        detach a session the recorder attached itself
 //   host.excludedWindowId()    a window never to pick a tab from (or null)
+//   host.onChange(status)      optional: a recording started or stopped (for a
+//                              badge or a popup); gets what status() returns
 //
-// and gets back `{ start, stop, status, isRecording, flush }`:
+// and gets back `{ start, stop, status, current, isRecording, flush }`:
 //
-//   start({ rec, tabId? })     record tabId, or the user's active tab; rec is the
-//                              caller's id for this recording
+//   start({ rec, tabId?, meta? })  record tabId, or the user's active tab; rec is
+//                              the caller's id for this recording, meta anything
+//                              small it wants back from status() (who started it)
 //   stop({ rec? })             stop, after pending bodies and screenshots land
-//   status()                   { recording: false } | { recording: true, rec, tabs, steps }
+//   current()                  status(), after a restart's resume settles
+//   status()                   { recording: false } |
+//                              { recording: true, rec, tabs, steps, title, url, meta }
 //
 // Every event goes out as {op: "rec", rec, t, tabId, method, params}: CDP events
 // verbatim (Runtime.consoleAPICalled, Runtime.exceptionThrown, Log.entryAdded,
@@ -222,8 +227,16 @@ export function createRecorder(host) {
   let dropped = 0; // events lost to a full queue, reported on the next flush
   let resuming = null; // a resume() in flight, which stop() must not race
 
-  const fresh = (id, seq = 0) => ({ rec: id, startedAt: Date.now(), seq, tabs: new Set(), own: new Set(),
-    scripts: new Map(), types: new Map(), pending: new Set() });
+  const fresh = (id, seq = 0, page = {}) => ({ rec: id, startedAt: Date.now(), seq, tabs: new Set(), own: new Set(),
+    scripts: new Map(), types: new Map(), pending: new Set(), page });
+
+  const changed = () => {
+    try {
+      host.onChange?.(status());
+    } catch {
+      // the host's UI is not the recording's problem
+    }
+  };
 
   /** `owner`: the recording a late body or screenshot belongs to; dropped if that one has ended. */
   function emit(tabId, method, params, owner = rec) {
@@ -245,7 +258,7 @@ export function createRecorder(host) {
 
   /** Remembered across a service-worker restart, so the recording can be picked up again. */
   function save() {
-    return chrome.storage.session.set({ [STATE_KEY]: { rec: rec.rec, tabs: [...rec.tabs], own: [...rec.own], seq: rec.seq } });
+    return chrome.storage.session.set({ [STATE_KEY]: { rec: rec.rec, tabs: [...rec.tabs], own: [...rec.own], seq: rec.seq, page: rec.page } });
   }
 
   /** Track an async fetch so stop waits for it before declaring the recording complete. */
@@ -303,7 +316,7 @@ export function createRecorder(host) {
     if (!args.rec) throw new Error("recordStart needs a recording id");
     const tab = args.tabId ? await chrome.tabs.get(args.tabId) : await userActiveTab();
     if (!/^https?:|^file:/.test(tab.url || "")) throw new Error(`cannot record ${tab.url || "this tab"} — only web pages`);
-    rec = fresh(args.rec);
+    rec = fresh(args.rec, 0, { title: tab.title, url: tab.url, meta: args.meta ?? null });
     emit(tab.id, "rec.start", { url: tab.url, title: tab.title, tabId: tab.id });
     try {
       await recordTab(tab.id);
@@ -313,6 +326,7 @@ export function createRecorder(host) {
       throw err;
     }
     await save();
+    changed();
     return { rec: args.rec, tabId: tab.id, url: tab.url, title: tab.title };
   }
 
@@ -328,11 +342,14 @@ export function createRecorder(host) {
     emit(null, "rec.stop", { steps: r.seq });
     rec = null;
     await chrome.storage.session.remove(STATE_KEY);
-    return { rec: r.rec, tabs: [...r.tabs], steps: r.seq };
+    changed();
+    return { rec: r.rec, tabs: [...r.tabs], steps: r.seq, meta: r.page.meta };
   }
 
   function status() {
-    return rec ? { recording: true, rec: rec.rec, tabs: [...rec.tabs], steps: rec.seq } : { recording: false };
+    return rec
+      ? { recording: true, rec: rec.rec, tabs: [...rec.tabs], steps: rec.seq, ...rec.page }
+      : { recording: false };
   }
 
   /** The service worker was evicted mid-recording: pick the tabs up again and mark the gap. */
@@ -344,7 +361,7 @@ export function createRecorder(host) {
   async function doResume() {
     const { [STATE_KEY]: saved } = await chrome.storage.session.get(STATE_KEY);
     if (!saved || rec) return;
-    rec = fresh(saved.rec, saved.seq || 0);
+    rec = fresh(saved.rec, saved.seq || 0, saved.page || {});
     const own = new Set(saved.own || []);
     for (const tabId of saved.tabs) {
       emit(tabId, "rec.detached", { reason: "the extension restarted — events in between are missing" });
@@ -357,6 +374,7 @@ export function createRecorder(host) {
         emit(tabId, "rec.detached", { reason: `could not pick the tab up again: ${err.message || err}` });
       }
     }
+    changed();
   }
 
   function shot(tabId, seq, delayMs) {
@@ -462,5 +480,11 @@ export function createRecorder(host) {
   });
 
   resume();
-  return { start, stop, status, isRecording: (tabId) => !!rec && rec.tabs.has(tabId), flush };
+  /** status(), once a recording that outlived a worker restart has been picked up again. */
+  async function current() {
+    if (resuming) await resuming;
+    return status();
+  }
+
+  return { start, stop, status, current, isRecording: (tabId) => !!rec && rec.tabs.has(tabId), flush };
 }

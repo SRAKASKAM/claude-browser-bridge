@@ -75,6 +75,25 @@ chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
     });
     return true;
   }
+  if (msg.op === "recState") {
+    Promise.all([recorder.current(), chrome.storage.local.get(LAST_KEY)]).then(([now, stored]) =>
+      reply({ now, last: stored[LAST_KEY] || null }));
+    return true;
+  }
+  if (msg.op === "recStart" || msg.op === "recStop") {
+    (msg.op === "recStart" ? popupRecordStart(msg) : popupRecordStop(msg)).then(
+      (result) => reply({ ok: true, result }),
+      (err) => reply({ ok: false, error: err.message || String(err) }),
+    );
+    return true;
+  }
+  if (msg.op === "recCopied") {
+    chrome.storage.local.get(LAST_KEY).then((stored) => {
+      if (stored[LAST_KEY]) chrome.storage.local.set({ [LAST_KEY]: { ...stored[LAST_KEY], copied: true } });
+      reply({ ok: true });
+    });
+    return true;
+  }
   if (msg.op === "setToken") {
     chrome.storage.local
       .set({ token: msg.token, port: msg.port || DEFAULT_PORT })
@@ -386,7 +405,43 @@ const recorder = createRecorder({
   },
   // The agents' own tabs are never "the tab the user is looking at".
   excludedWindowId: agentWindowId,
+  onChange: (s) => {
+    chrome.action.setBadgeBackgroundColor({ color: "#c02b2b" });
+    chrome.action.setBadgeText({ text: s.recording ? "REC" : "" });
+  },
 });
+
+// The popup's Record / Stop: no agent, so the server builds the folder and the
+// popup hands the user a line to paste into a Claude chat.
+const LAST_KEY = "lastRecording"; // chrome.storage.local
+
+async function popupRecordStart({ tabId, name }) {
+  if (!socket || socket.readyState !== WebSocket.OPEN) throw new Error("not connected — is the bridge server running?");
+  const rec = crypto.randomUUID().replace(/-/g, "").slice(0, 12);
+  const started = await recorder.start({ rec, tabId, meta: { by: "popup", name: name || null } });
+  await chrome.storage.local.remove(LAST_KEY);
+  return started;
+}
+
+async function popupRecordStop({ name }) {
+  const now = await recorder.current();
+  if (!now.recording) throw new Error("no recording is running");
+  const stopped = await recorder.stop({ rec: now.rec });
+  let last;
+  try {
+    const resp = await fetch(`http://127.0.0.1:${port}/record/build`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Bridge-Token": token },
+      body: JSON.stringify({ rec: stopped.rec, name: name || now.meta?.name || null }),
+    });
+    last = resp.ok ? await resp.json() : { ok: false, error: `${resp.status} ${await resp.text()}` };
+  } catch (err) {
+    last = { ok: false, error: `the bridge server did not answer: ${err.message || err}` };
+  }
+  last = { ...last, rec: stopped.rec, copied: false };
+  await chrome.storage.local.set({ [LAST_KEY]: last });
+  return last;
+}
 
 // --------------------------------------------------------------- operations
 

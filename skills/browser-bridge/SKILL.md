@@ -252,6 +252,14 @@ $BB record status
 The user can do the whole round with `/record-browser [profile] [what]`: it
 starts, waits for "stop", and answers with the report's gist and a link.
 
+He can also record without any agent: the extension's popup has **Record this
+tab** / **Stop** (the toolbar icon shows a red REC meanwhile). On Stop the
+bridge server builds the folder into `~/Downloads/browser-recordings/`
+(`BROWSER_BRIDGE_RECORDINGS_DIR` to change) and the popup copies a line for a
+Claude chat to the clipboard: the absolute path of its `report.md`. When he
+pastes that, read the report as below. The popup's Stop also ends a recording
+an agent started; `bb record stop` then still builds that agent's own folder.
+
 It records the tab he is looking at — never the agent window — plus every tab
 or popup opened from it, across navigations. Chrome shows its yellow
 "started debugging this browser" bar while it runs; **Cancel on that bar ends
